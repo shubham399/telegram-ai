@@ -44,6 +44,29 @@ function truncate(s: string, max: number): string {
   return s.slice(0, max) + '…'
 }
 
+const TEXT_TOOL_RE = /^TOOL:\s*(\w+)(?:\s+(.+))?$/im
+
+function parseTextToolCalls(text: string, availableTools: Record<string, CustomToolDef>): Array<{ name: string; args: Record<string, any> }> {
+  const calls: Array<{ name: string; args: Record<string, any> }> = []
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    const match = trimmed.match(TEXT_TOOL_RE)
+    if (match && match[1] in availableTools) {
+      let args: Record<string, any> = {}
+      if (match[2]) {
+        try { args = JSON.parse(match[2]) }
+        catch { args = { value: match[2] } }
+      }
+      calls.push({ name: match[1], args })
+    }
+  }
+  return calls
+}
+
+function stripTextToolCalls(text: string): string {
+  return text.split('\n').filter(l => !TEXT_TOOL_RE.test(l.trim())).join('\n').trim()
+}
+
 function customToolToOpenAI(name: string, def: CustomToolDef): ChatCompletionTool {
   return {
     type: 'function',
@@ -160,6 +183,11 @@ export async function processUserMessage(
     ([name, def]) => customToolToOpenAI(name, def),
   )
 
+  const toolDescriptions = Object.entries(customTools)
+    .map(([name, def]) => `- ${name}: ${def.description ?? 'no description'}`)
+    .join('\n')
+  systemPrompt += `\n\n## Available Tools\n${toolDescriptions}`
+
   const AI_TIMEOUT_MS = 180_000
   const abortController = new AbortController()
   const timeoutId = setTimeout(() => {
@@ -237,6 +265,9 @@ export async function processUserMessage(
         }
       }
 
+      const textToolCalls = parseTextToolCalls(responseContent, customTools)
+      const hasTextCalls = textToolCalls.length > 0
+
       if (responseToolCalls.length > 0) {
         toolCallCount += responseToolCalls.length
 
@@ -286,6 +317,47 @@ export async function processUserMessage(
         }
 
         log.info(`Step ${step}/${maxSteps} finished: tool_calls=${stepToolNames.join(', ')}`)
+      } else if (hasTextCalls) {
+        toolCallCount += textToolCalls.length
+        const cleanResponse = stripTextToolCalls(responseContent)
+        const assistantMsg: ChatCompletionAssistantMessageParam = {
+          role: 'assistant',
+          content: cleanResponse || null,
+        }
+        apiMessages.push(assistantMsg)
+
+        const stepToolNames: string[] = []
+
+        for (const tc of textToolCalls) {
+          stepToolNames.push(tc.name)
+          log.info(`  Text tool call: ${tc.name}(args=${maskPii(truncate(JSON.stringify(tc.args), 200))})`)
+
+          let result: any
+          try {
+            if (tc.name in customTools) {
+              onToolCall(tc.name, tc.args)
+              result = await customTools[tc.name].execute(tc.args)
+            } else {
+              log.warn(`Unknown text tool: ${tc.name}`)
+              result = `⚠️ Unknown tool: ${tc.name}`
+            }
+          } catch (err: any) {
+            log.warn(`Text tool execution failed: ${tc.name} — ${err.message}`)
+            result = `⚠️ Error executing ${tc.name}: ${err.message}`
+          }
+
+          const summary = summarizeResult(result)
+          log.info(`  Text tool result: ${tc.name} -> ${maskPii(truncate(summary, 100))}`)
+          onToolResult(tc.name, summary)
+
+          apiMessages.push({
+            role: 'tool',
+            tool_call_id: `text_${tc.name}_${step}`,
+            content: typeof result === 'string' ? result : JSON.stringify(result),
+          } as ChatCompletionMessageParam)
+        }
+
+        log.info(`Step ${step}/${maxSteps} finished: text_tool_calls=${stepToolNames.join(', ')}`)
       } else {
         log.info(`Step ${step}/${maxSteps} finished: response, finish_reason=${finishReason}`)
         clearTimeout(timeoutId)

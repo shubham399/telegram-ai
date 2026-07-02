@@ -11,7 +11,7 @@ export function createTool(ctx: ToolContext): CustomToolDef | null {
   if (!session) return null
 
   return {
-    description: 'Access connected third-party apps (Google Calendar, Gmail, GitHub, etc). Two actions: search (find available tools + their slugs for a query), execute (run a tool by slug with args). ALWAYS search first to find the right tool slug, then execute it.',
+    description: 'External Connected to multiple services like Gmail, Google Calendar, GitHub, and many more connections. Two actions: search (find available tools + their slugs for a query), execute (run a tool by slug with args). ALWAYS search first to find the right tool slug, then execute it.',
     parameters: z.object({
       action: z.enum(['search', 'execute']).describe('search = find tools matching query, execute = run a tool by slug with args'),
       query: z.string().optional().describe('For search: what kind of tool you need (e.g. "google calendar events", "gmail inbox")'),
