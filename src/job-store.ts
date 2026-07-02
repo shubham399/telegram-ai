@@ -118,7 +118,7 @@ export class JobStore {
       .all(telegramUserId, `%${task.trim()}%`) as { id: number; task: string }[]
     if (rows.length === 0) return null
     const ids = rows.map(r => r.id)
-    this.db.run(`UPDATE scheduled_jobs SET active = 0, next_run_at = NULL WHERE id IN (${ids.map(() => '?').join(',')})`, ids)
+    this.db.run(`UPDATE scheduled_jobs SET active = 0, next_run_at = NULL WHERE id IN (${ids.map(() => '?').join(',')})`, ids as any)
     const tasks = rows.map(r => `"${r.task}"`).join(', ')
     this.log.info(`Cancelled jobs #${ids.join(', #')} for user ${telegramUserId}: ${tasks}`)
     return `Cancelled: ${tasks}`

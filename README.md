@@ -1,4 +1,8 @@
-# Telegram AI Agent
+# telegram-ai
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Bun](https://img.shields.io/badge/runtime-Bun-%23e3e3e3?logo=bun)](https://bun.sh)
+[![TypeScript](https://img.shields.io/badge/lang-TypeScript-%233178C6?logo=typescript)](https://www.typescriptlang.org/)
 
 Telegram bot — whitelisted messages → AI → tool execution (Composio + custom). Polling mode, no HTTP server.
 
@@ -19,7 +23,7 @@ bun run --watch src/index.ts
 | `TELEGRAM_ALLOWED_USERS` | ✓ | — (comma-separated IDs) |
 | `COMPOSIO_API_KEY` | ✓ | — |
 | `AI_API_KEY` | ✓ | — |
-| `AI_BASE_URL` | | (any OpenAI-compatible endpoint) |
+| `AI_BASE_URL` | | `https://api.openai.com/v1` |
 | `MODEL` | | `gpt-4o-mini` |
 
 ## Run
@@ -36,6 +40,6 @@ npm start
 
 `bot.ts` → whitelist → `processUserMessage()` (ai.ts) → composio + custom tools → streamText response → Telegram.
 
-Custom tools in `src/tools/`.
+Custom tools in `src/tools/`. Admin-only tools get `adminOnly` export.
 
 SQLite stores for sessions, memory, jobs. Bun Web Workers for background scheduling.

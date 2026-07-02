@@ -1,5 +1,5 @@
 import { type Database } from 'bun:sqlite'
-import type { ModelMessage } from 'ai'
+import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions'
 import { Logger } from './logger'
 
 export class ConversationStore {
@@ -9,21 +9,21 @@ export class ConversationStore {
     this.log = new Logger('conversation-store')
   }
 
-  append(userId: string, messages: ModelMessage[]): void {
+  append(userId: string, messages: ChatCompletionMessageParam[]): void {
     const now = new Date().toISOString()
     for (const m of messages) {
       this.db.run(
         'INSERT INTO conversation_messages (telegram_user_id, role, content, created_at) VALUES (?, ?, ?, ?)',
-        [userId, m.role, JSON.stringify(m.content), now],
+        [userId, m.role, JSON.stringify(m), now],
       )
     }
   }
 
-  list(userId: string): ModelMessage[] {
+  list(userId: string): ChatCompletionMessageParam[] {
     const rows = this.db
-      .query('SELECT role, content FROM conversation_messages WHERE telegram_user_id = ? ORDER BY id')
-      .all(userId) as { role: string; content: string }[]
-    return rows.map(r => ({ role: r.role, content: JSON.parse(r.content) })) as ModelMessage[]
+      .query('SELECT content FROM conversation_messages WHERE telegram_user_id = ? ORDER BY id')
+      .all(userId) as { content: string }[]
+    return rows.map(r => JSON.parse(r.content) as ChatCompletionMessageParam)
   }
 
   count(userId: string): number {
@@ -33,11 +33,6 @@ export class ConversationStore {
     return row.c
   }
 
-  // Compact oldest-first: fold the excess rows beyond keepLast into one
-  // summary pair, reusing the first two excess row ids so ORDER BY id still
-  // reads oldest-to-newest with no separate summary table/side-channel.
-  // ponytail: two sequential updates + one delete, not a transaction — a
-  // crash mid-compact leaves at most a stale row, not corrupted history.
   compact(userId: string, keepLast: number, summaryText: string): void {
     const rows = this.db
       .query('SELECT id FROM conversation_messages WHERE telegram_user_id = ? ORDER BY id')
@@ -48,10 +43,10 @@ export class ConversationStore {
     const [first, second, ...rest] = excess
     const now = new Date().toISOString()
     this.db.run('UPDATE conversation_messages SET role = ?, content = ?, created_at = ? WHERE id = ?', [
-      'user', JSON.stringify(`[Earlier conversation context: ${summaryText}]`), now, first.id,
+      'user', JSON.stringify({ role: 'user', content: `[Earlier conversation context: ${summaryText}]` }), now, first.id,
     ])
     this.db.run('UPDATE conversation_messages SET role = ?, content = ?, created_at = ? WHERE id = ?', [
-      'assistant', JSON.stringify('Understood, I have context from our earlier conversation.'), now, second.id,
+      'assistant', JSON.stringify({ role: 'assistant', content: 'Understood, I have context from our earlier conversation.' }), now, second.id,
     ])
     if (rest.length) {
       const placeholders = rest.map(() => '?').join(',')

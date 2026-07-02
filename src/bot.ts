@@ -1,5 +1,5 @@
 import { Telegraf, type Context } from 'telegraf'
-import { env, ALLOWED_USER_IDS, SESSION_TIMEOUT_MS } from './config'
+import { env, ALLOWED_USER_IDS } from './config'
 import { Logger } from './logger'
 import { SessionStore } from './session-store'
 import { MemoryStore } from './memory-store'
@@ -8,12 +8,13 @@ import type { JobStore } from './job-store'
 import { processUserMessage, summarizeConversation } from './ai'
 import { startScheduler } from './scheduler'
 import { maskPii } from './pii'
-import type { ModelMessage } from 'ai'
+import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions'
 
 const log = new Logger('bot')
 
 export function createBot(sessionStore: SessionStore, conversationStore: ConversationStore, memoryStore?: MemoryStore, jobStore?: JobStore) {
   const bot = new Telegraf(env.TELEGRAM_BOT_TOKEN)
+  const SESSION_TIMEOUT_MS = 10 * 60 * 1000
   const MAX_CONV_MESSAGES = 20
   const convLog = log.child('conversations')
 
@@ -137,9 +138,9 @@ export function createBot(sessionStore: SessionStore, conversationStore: Convers
       const storedHistory = conversationStore.list(userId)
       msgLog.debug(`History before: ${storedHistory.length} entries`)
 
-      const aiMessages: ModelMessage[] = [
+      const aiMessages: ChatCompletionMessageParam[] = [
         ...storedHistory,
-        { role: 'user' as const, content: text },
+        { role: 'user', content: text },
       ]
 
       try {

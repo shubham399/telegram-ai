@@ -4,7 +4,7 @@ import { SessionStore } from './session-store'
 import { MemoryStore } from './memory-store'
 import { JobStore } from './job-store'
 import { TaskStore, type Task } from './task-store'
-import type { ModelMessage } from 'ai'
+import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions'
 
 const level = (typeof process !== 'undefined' && process.env.LOG_LEVEL) || 'INFO'
 const log = new Logger('ai-worker', level as any)
@@ -60,7 +60,7 @@ async function processTask(task: Task): Promise<void> {
       const existingSessionId = existingRow?.composioSessionId ?? null
       log.info(`task #${current.id}: session=${existingSessionId ?? 'new'}`)
 
-      const messages: ModelMessage[] = [{ role: 'user', content: `[SCHEDULED TASK — execute this now, do not create a new schedule]\n${current.taskText}` }]
+      const messages: ChatCompletionMessageParam[] = [{ role: 'user', content: `[SCHEDULED TASK — execute this now, do not create a new schedule]\n${current.taskText}` }]
       const result = await processUserMessage(
         messages, current.telegramUserId, existingSessionId,
         () => {}, () => {},

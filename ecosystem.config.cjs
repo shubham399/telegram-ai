@@ -1,6 +1,6 @@
 module.exports = {
   apps: [{
-    name: 'telegram-bot',
+    name: 'telegram-ai',
     script: 'src/index.ts',
     interpreter: 'bun',
     watch: ['src/', 'prompts/'],
