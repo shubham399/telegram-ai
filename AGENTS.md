@@ -53,6 +53,7 @@ Telegram bot: whitelisted user messages → AI (OpenAI-compatible) → Composio 
 | AI_BASE_URL | default | https://api.openai.com/v1 |
 | MODEL | default | gpt-4o-mini |
 | LOG_LEVEL | default | INFO |
+| MAX_TOOL_RESULT_CHARS | default | 16000 — caps tool result size before it's appended to apiMessages, prevents context-window blowout on large tool payloads (e.g. Gmail fetch) |
 
 ## Commands
 ```bash

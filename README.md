@@ -25,6 +25,8 @@ bun run --watch src/index.ts
 | `AI_API_KEY` | ✓ | — |
 | `AI_BASE_URL` | | `https://api.openai.com/v1` |
 | `MODEL` | | `gpt-4o-mini` |
+| `AGENT_MAX_STEPS` | | `10` |
+| `MAX_TOOL_RESULT_CHARS` | | `16000` (cap on tool result size fed back to the model) |
 
 ## Run
 

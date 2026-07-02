@@ -3,10 +3,9 @@ import { join } from 'path'
 import OpenAI from 'openai'
 import type { ChatCompletionTool, ChatCompletionMessageParam, ChatCompletionAssistantMessageParam } from 'openai/resources/chat/completions'
 import { zodToJsonSchema } from 'zod-to-json-schema'
-import { Composio } from '@composio/core'
-import { OpenAIResponsesProvider } from '@composio/openai'
+import { Composio, OpenAIProvider } from '@composio/core'
 import { Logger } from './logger'
-import { env, AGENT_MAX_STEPS, MODEL, AI_API_KEY, AI_BASE_URL } from './config'
+import { env, AGENT_MAX_STEPS, MODEL, AI_API_KEY, AI_BASE_URL, MAX_TOOL_RESULT_CHARS } from './config'
 import { maskPii } from './pii'
 import type { MemoryStore } from './memory-store'
 import type { JobStore } from './job-store'
@@ -21,7 +20,7 @@ const client = new OpenAI({
 
 export const composio = new Composio({
   apiKey: env.COMPOSIO_API_KEY,
-  provider: new OpenAIResponsesProvider(),
+  provider: new OpenAIProvider(),
 })
 
 const SYSTEM_PROMPT = readFileSync(join(import.meta.dir, '..', 'prompts', 'system.txt'), 'utf-8').trim()
@@ -46,12 +45,12 @@ function truncate(s: string, max: number): string {
 
 const TEXT_TOOL_RE = /^TOOL:\s*(\w+)(?:\s+(.+))?$/im
 
-function parseTextToolCalls(text: string, availableTools: Record<string, CustomToolDef>): Array<{ name: string; args: Record<string, any> }> {
+function parseTextToolCalls(text: string, availableTools: Record<string, CustomToolDef>, composioNames: Set<string>): Array<{ name: string; args: Record<string, any> }> {
   const calls: Array<{ name: string; args: Record<string, any> }> = []
   for (const line of text.split('\n')) {
     const trimmed = line.trim()
     const match = trimmed.match(TEXT_TOOL_RE)
-    if (match && match[1] in availableTools) {
+    if (match && (match[1] in availableTools || composioNames.has(match[1].toUpperCase()))) {
       let args: Record<string, any> = {}
       if (match[2]) {
         try { args = JSON.parse(match[2]) }
@@ -66,6 +65,7 @@ function parseTextToolCalls(text: string, availableTools: Record<string, CustomT
 function stripTextToolCalls(text: string): string {
   return text.split('\n').filter(l => !TEXT_TOOL_RE.test(l.trim())).join('\n').trim()
 }
+
 
 function customToolToOpenAI(name: string, def: CustomToolDef): ChatCompletionTool {
   return {
@@ -139,6 +139,7 @@ export interface ProcessResult {
   composioSessionId: string
   totalSteps: number
   finishReason: string
+  lastToolResult?: string
 }
 
 export async function processUserMessage(
@@ -176,17 +177,33 @@ export async function processUserMessage(
 
   const ctx: ToolContext = { entityId, composioSession: session, memoryStore, jobStore }
   const customTools = await loadTools(ctx)
+
+  let composioToolNames = new Set<string>()
+  let composioOpenAITools: ChatCompletionTool[] = []
+  try {
+    const raw = await session.tools()
+    if (Array.isArray(raw)) {
+      composioOpenAITools = raw as ChatCompletionTool[]
+      composioToolNames = new Set(composioOpenAITools.map(t => (t as any).function.name.toUpperCase()))
+    }
+  } catch (err: any) {
+    log.warn(`Failed to load composio tools: ${err.message}`)
+  }
+
   const toolNames = Object.keys(customTools)
-  log.info(`Loaded ${toolNames.length} custom tools: ${toolNames.join(', ')}`)
+  log.info(`Loaded ${toolNames.length} custom tools + ${composioOpenAITools.length} composio tools`)
 
   const customOpenAITools: ChatCompletionTool[] = Object.entries(customTools).map(
     ([name, def]) => customToolToOpenAI(name, def),
   )
 
+  const allTools = [...composioOpenAITools, ...customOpenAITools]
+
   const toolDescriptions = Object.entries(customTools)
     .map(([name, def]) => `- ${name}: ${def.description ?? 'no description'}`)
     .join('\n')
-  systemPrompt += `\n\n## Available Tools\n${toolDescriptions}`
+  const composioToolDescs = composioOpenAITools.map(t => `- ${(t as any).function.name}: ${(t as any).function.description ?? 'composio tool'}`).join('\n')
+  systemPrompt += `\n\n## Available Tools\n${toolDescriptions}${composioToolDescs ? '\n' + composioToolDescs : ''}`
 
   const AI_TIMEOUT_MS = 180_000
   const abortController = new AbortController()
@@ -194,10 +211,6 @@ export async function processUserMessage(
     log.warn(`AI agent timeout after ${AI_TIMEOUT_MS}ms for entity ${entityId}`)
     abortController.abort()
   }, AI_TIMEOUT_MS)
-
-  const firstChunkWarningId = setTimeout(() => {
-    log.warn(`No response from model after 30s for entity ${entityId} — still waiting`)
-  }, 30_000)
 
   log.info(`Starting agent loop (max ${maxSteps} steps), timeout ${AI_TIMEOUT_MS}ms`)
 
@@ -208,9 +221,9 @@ export async function processUserMessage(
 
   let step = 0
   let toolCallCount = 0
+  let finalText = ''
   let timedOut = false
-  let gotFirstChunk = false
-  let accumulatedText = ''
+  let lastToolResult = ''
 
   try {
     for (step = 1; step <= maxSteps; step++) {
@@ -219,155 +232,116 @@ export async function processUserMessage(
       const response = await client.chat.completions.create({
         model: MODEL,
         messages: apiMessages,
-        tools: customOpenAITools.length > 0 ? customOpenAITools : undefined,
-        stream: true,
-      })
+        tools: allTools.length > 0 ? allTools : undefined,
+        stream: false,
+      }, { signal: abortController.signal })
 
-      let finishReason = ''
-      let responseContent = ''
-      let responseToolCalls: any[] = []
+      const msg = response.choices?.[0]?.message
+      if (!msg) break
 
-      for await (const chunk of response) {
-        if (!gotFirstChunk) {
-          gotFirstChunk = true
-          clearTimeout(firstChunkWarningId)
-          log.info(`First chunk received`)
-        }
+      const hasNativeCalls = !!(msg.tool_calls && msg.tool_calls.length > 0)
+      const textCalls = parseTextToolCalls(msg.content || '', customTools, composioToolNames)
+      const hasTextCalls = textCalls.length > 0
 
-        const choice = chunk.choices?.[0]
-        if (!choice) continue
+      if (hasNativeCalls) {
+        toolCallCount += msg.tool_calls!.length
+        apiMessages.push(msg)
 
-        if (choice.delta?.content) {
-          responseContent += choice.delta.content
-          accumulatedText += choice.delta.content
-        }
-
-        if (choice.delta?.tool_calls) {
-          for (const tcDelta of choice.delta.tool_calls) {
-            if (tcDelta.id) {
-              responseToolCalls.push({
-                id: tcDelta.id,
-                type: 'function',
-                index: tcDelta.index,
-                function: { name: tcDelta.function?.name || '', arguments: tcDelta.function?.arguments || '' },
-              })
-            } else {
-              const existing = responseToolCalls.find((tc: any) => tc.index === tcDelta.index)
-              if (existing) {
-                existing.function.arguments += tcDelta.function?.arguments || ''
-              }
-            }
-          }
-        }
-
-        if (choice.finish_reason) {
-          finishReason = choice.finish_reason
-        }
-      }
-
-      const textToolCalls = parseTextToolCalls(responseContent, customTools)
-      const hasTextCalls = textToolCalls.length > 0
-
-      if (responseToolCalls.length > 0) {
-        toolCallCount += responseToolCalls.length
-
-        const assistantMsg: ChatCompletionAssistantMessageParam & { function_call?: any } = {
-          role: 'assistant',
-          content: responseContent || null,
-          tool_calls: responseToolCalls.map((tc: any) => ({
-            id: tc.id,
-            type: 'function' as const,
-            function: { name: tc.function.name, arguments: tc.function.arguments },
-          })),
-        }
-        apiMessages.push(assistantMsg)
-
-        const stepToolNames: string[] = []
-
-        for (const tc of responseToolCalls) {
-          const toolName = tc.function.name
-          stepToolNames.push(toolName)
-          const cleanName = toolName.includes('<|') ? toolName.split('<|')[0] : toolName
-          log.info(`  Tool call: ${cleanName}(args=${maskPii(truncate(tc.function.arguments, 200))})`)
+        for (const tcRaw of msg.tool_calls!) {
+          const tc = tcRaw as any
+          if (!tc.function) continue
+          const name = tc.function.name
+          const cleanName = name.includes('<|') ? name.split('<|')[0] : name
+          log.info(`  Native call: ${cleanName}(${maskPii(truncate(tc.function.arguments, 200))})`)
 
           let result: any
           try {
-            if (toolName in customTools) {
+            if (cleanName in customTools) {
               const args = JSON.parse(tc.function.arguments || '{}')
               onToolCall(cleanName, args)
-              result = await customTools[toolName].execute(args)
+              result = await customTools[cleanName].execute(args)
+            } else if (composioToolNames.has(cleanName.toUpperCase())) {
+              onToolCall(cleanName)
+              result = await composio.provider.executeToolCall(entityId, { ...tc, function: { ...tc.function, name: cleanName } })
             } else {
-              log.warn(`Unknown tool: ${toolName}`)
-              result = `⚠️ Unknown tool: ${toolName}`
+              log.warn(`Unknown tool: ${cleanName}`)
+              result = `⚠️ Unknown tool: ${cleanName}`
             }
           } catch (err: any) {
-            log.warn(`Tool execution failed: ${toolName} — ${err.message}`)
-            result = `⚠️ Error executing ${toolName}: ${err.message}`
+            log.warn(`Tool failed: ${cleanName} — ${err.message}`)
+            result = `⚠️ Error: ${err.message}`
           }
 
           const summary = summarizeResult(result)
-          log.info(`  Tool result: ${cleanName} -> ${maskPii(truncate(summary, 100))}`)
+          log.info(`  Result: ${cleanName} -> ${maskPii(truncate(summary, 100))}`)
           onToolResult(cleanName, summary)
+          lastToolResult = summary
 
           apiMessages.push({
             role: 'tool',
             tool_call_id: tc.id,
-            content: typeof result === 'string' ? result : JSON.stringify(result),
+            content: truncate(typeof result === 'string' ? result : JSON.stringify(result), MAX_TOOL_RESULT_CHARS),
           } as ChatCompletionMessageParam)
         }
+        const callNames = (msg.tool_calls || []).map(t => { const tc = t as any; return tc.function?.name || '?' }).join(', ')
+        log.info(`Step ${step}/${maxSteps} finished: native_calls=${callNames}`)
 
-        log.info(`Step ${step}/${maxSteps} finished: tool_calls=${stepToolNames.join(', ')}`)
       } else if (hasTextCalls) {
-        toolCallCount += textToolCalls.length
-        const cleanResponse = stripTextToolCalls(responseContent)
-        const assistantMsg: ChatCompletionAssistantMessageParam = {
-          role: 'assistant',
-          content: cleanResponse || null,
-        }
-        apiMessages.push(assistantMsg)
+        toolCallCount += textCalls.length
+        const cleanContent = stripTextToolCalls(msg.content || '')
+        apiMessages.push({ role: 'assistant', content: cleanContent || null })
 
-        const stepToolNames: string[] = []
-
-        for (const tc of textToolCalls) {
-          stepToolNames.push(tc.name)
-          log.info(`  Text tool call: ${tc.name}(args=${maskPii(truncate(JSON.stringify(tc.args), 200))})`)
+        for (const tc of textCalls) {
+          log.info(`  Text call: ${tc.name}(${maskPii(truncate(JSON.stringify(tc.args), 200))})`)
 
           let result: any
           try {
             if (tc.name in customTools) {
               onToolCall(tc.name, tc.args)
               result = await customTools[tc.name].execute(tc.args)
+            } else if (composioToolNames.has(tc.name.toUpperCase())) {
+              onToolCall(tc.name, tc.args)
+              result = await composio.provider.executeToolCall(entityId, {
+                id: `text_${tc.name}_${step}`,
+                type: 'function' as const,
+                function: { name: tc.name, arguments: JSON.stringify(tc.args) },
+              })
             } else {
               log.warn(`Unknown text tool: ${tc.name}`)
               result = `⚠️ Unknown tool: ${tc.name}`
             }
           } catch (err: any) {
-            log.warn(`Text tool execution failed: ${tc.name} — ${err.message}`)
-            result = `⚠️ Error executing ${tc.name}: ${err.message}`
+            log.warn(`Text tool failed: ${tc.name} — ${err.message}`)
+            result = `⚠️ Error: ${err.message}`
           }
 
           const summary = summarizeResult(result)
-          log.info(`  Text tool result: ${tc.name} -> ${maskPii(truncate(summary, 100))}`)
+          log.info(`  Result: ${tc.name} -> ${maskPii(truncate(summary, 100))}`)
           onToolResult(tc.name, summary)
+          lastToolResult = summary
 
           apiMessages.push({
             role: 'tool',
             tool_call_id: `text_${tc.name}_${step}`,
-            content: typeof result === 'string' ? result : JSON.stringify(result),
+            content: truncate(typeof result === 'string' ? result : JSON.stringify(result), MAX_TOOL_RESULT_CHARS),
           } as ChatCompletionMessageParam)
         }
+        log.info(`Step ${step}/${maxSteps} finished: text_calls=${textCalls.map(t => t.name).join(', ')}`)
 
-        log.info(`Step ${step}/${maxSteps} finished: text_tool_calls=${stepToolNames.join(', ')}`)
       } else {
-        log.info(`Step ${step}/${maxSteps} finished: response, finish_reason=${finishReason}`)
+        log.info(`Step ${step}/${maxSteps} finished: response, finish_reason=${response.choices[0]?.finish_reason}`)
+        finalText = msg.content || ''
         clearTimeout(timeoutId)
 
+        apiMessages.push(msg)
+
         return {
-          text: responseContent,
+          text: finalText,
           messages: apiMessages.filter(m => m.role !== 'system'),
           composioSessionId: session.sessionId,
           totalSteps: step,
-          finishReason: finishReason || 'stop',
+          finishReason: response.choices[0]?.finish_reason || 'stop',
+          lastToolResult,
         }
       }
     }
@@ -381,31 +355,27 @@ export async function processUserMessage(
     }
   } finally {
     clearTimeout(timeoutId)
-    clearTimeout(firstChunkWarningId)
   }
 
-  if (timedOut || abortController.signal.aborted) {
-    log.warn(`Agent loop timed out for entity ${entityId}: timedOut=${timedOut}, aborted=${abortController.signal.aborted}`)
+  if (timedOut) {
     return {
-      text: '⚠️ I took too long to respond. Please try again or rephrase your request.',
+      text: '⚠️ I took too long to respond. Try again.',
       messages: [],
       composioSessionId: session.sessionId,
       totalSteps: step,
       finishReason: 'timeout',
+      lastToolResult,
     }
   }
 
-  log.info(`Agent loop complete: ${step} steps, ${toolCallCount} tool calls`)
-
   const lastMsg = apiMessages[apiMessages.length - 1]
-  const finalContent = lastMsg?.role === 'assistant' ? lastMsg.content : null
-  const finalText = typeof finalContent === 'string' ? finalContent : accumulatedText || ''
-
+  const content = lastMsg?.role === 'assistant' ? lastMsg.content : null
   return {
-    text: finalText,
+    text: typeof content === 'string' ? content : finalText,
     messages: apiMessages.filter(m => m.role !== 'system'),
     composioSessionId: session.sessionId,
     totalSteps: step,
     finishReason: 'max-steps',
+    lastToolResult,
   }
 }

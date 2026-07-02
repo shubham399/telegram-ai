@@ -145,7 +145,7 @@ export function createBot(sessionStore: SessionStore, conversationStore: Convers
 
       try {
         msgLog.info('Calling processUserMessage')
-        const { text: finalText, messages: updatedMessages, composioSessionId, totalSteps, finishReason } = await processUserMessage(
+        const { text: finalText, messages: updatedMessages, composioSessionId, totalSteps, finishReason, lastToolResult } = await processUserMessage(
           aiMessages,
           userId,
           existingSessionId,
@@ -168,7 +168,8 @@ export function createBot(sessionStore: SessionStore, conversationStore: Convers
         msgLog.info(`Agent completed: ${totalSteps} steps, finish=${finishReason}`)
         sessionStore.upsert(userId, composioSessionId)
 
-        conversationStore.append(userId, [{ role: 'user' as const, content: text }, ...updatedMessages])
+        const newToStore = updatedMessages.slice(storedHistory.length)
+        conversationStore.append(userId, newToStore)
 
         const totalCount = conversationStore.count(userId)
         if (totalCount > MAX_CONV_MESSAGES) {
@@ -188,7 +189,10 @@ export function createBot(sessionStore: SessionStore, conversationStore: Convers
           }
           msgLog.info(`Reply: "${maskPii(finalText.slice(0, 200))}"`)
           await ctx.reply(finalText, replyOpts)
-        } else if (finishReason !== 'tool-calls') {
+        } else if (lastToolResult) {
+          msgLog.warn('No final text from AI, falling back to last tool result')
+          await ctx.reply(lastToolResult, replyOpts)
+        } else {
           msgLog.warn('No final text from AI, sending fallback reply')
           await ctx.reply('Done! What else can I help with?', replyOpts)
         }
