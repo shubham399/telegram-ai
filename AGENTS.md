@@ -7,7 +7,7 @@ Telegram bot: whitelisted user messages → AI (OpenAI-compatible) → Composio 
 - **Runtime**: Bun (local long-running process)
 - **Framework**: Telegraf v4
 - **AI SDK**: OpenAI SDK (`openai` v6, Chat Completions API)
-- **Composio**: `@composio/core` + `@composio/openai` (OpenAIResponsesProvider)
+- **Composio**: `@composio/core` (OpenAIProvider)
 - **Tools**: Auto-loaded from `src/tools/` (each file exports `toolName` + `createTool(ctx)`)
 - **Config**: Zod schema from `process.env`; Bun auto-loads `.env.local`
 - **DB**: SQLite via `bun:sqlite` (no ORM)
@@ -17,7 +17,7 @@ Telegram bot: whitelisted user messages → AI (OpenAI-compatible) → Composio 
 | File | Purpose |
 |------|---------|
 | `src/index.ts` | Entry, wires stores → `createBot()` |
-| `src/bot.ts` | Telegraf setup: whitelist middleware, /start, text handler, streaming UX |
+| `src/bot.ts` | Telegraf setup: whitelist middleware, /start, text handler, tool UX |
 | `src/ai.ts` | AI agent loop: OpenAI SDK Chat Completions, manual agentic loop, auto-loads tools from `src/tools/` |
 | `src/config.ts` | Zod env schema, exports typed config |
 | `src/tool-def.ts` | CustomToolDef + ToolContext type definitions |
@@ -38,8 +38,8 @@ Telegram bot: whitelisted user messages → AI (OpenAI-compatible) → Composio 
 - Custom tools: add `.ts` file in `src/tools/` with exports: `toolName`, `createTool(ctx)`, optional `adminOnly`/`needsMemory`/`needsJobStore`. Auto-loaded by `loadTools()` in `ai.ts`.
 - Admin-only tools: set `export const adminOnly = true` in tool file. Auto-skipped for non-admin users.
 - Tool params: Zod schema with `.describe()` for LLM hints
-- Streaming UX: `onToolCall` → "🔧 Calling...", `onToolResult` → "📎 Result:..."
-- composio tool handles all third-party integrations via `session.search()` + `session.execute()`; LLM calls `composio({action:"search", query:"..."})` then `composio({action:"execute", tool:"SLUG", args:{...}})`
+- Tool UX: `onToolCall` → "🔧 Calling...", `onToolResult` → "📎 Result:..."
+- Composio tools are loaded as native OpenAI function calls from the composio session; custom tools in `src/tools/` use text-based `TOOL:` parsing.
 - Conversation: SQLite (`conversation_messages`), trimmed to MAX_CONV_MESSAGES (20) via async compaction — messages stored as full JSON blob. Cleared when the composio session expires/is missing.
 - Scheduling: client-side regex intercept BEFORE AI agent loop (parseScheduling in bot.ts)
 

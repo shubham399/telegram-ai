@@ -40,7 +40,7 @@ npm start
 
 ## Architecture
 
-`bot.ts` → whitelist → `processUserMessage()` (ai.ts) → composio + custom tools → streamText response → Telegram.
+`bot.ts` → whitelist → `processUserMessage()` (ai.ts) → composio + custom tools → response → Telegram.
 
 Custom tools in `src/tools/`. Admin-only tools get `adminOnly` export.
 

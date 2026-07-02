@@ -12,5 +12,5 @@ powered by any OpenAI-compatible API + Composio tool execution.
 | **AI Model** | Configurable via `MODEL` env var |
 | **Composio Session** | Per-user tool runtime session; created on first message, reused after |
 | **Bot** | Telegraf instance running on Bun (polling mode) |
-| **Streaming UX** | Step messages: user sees intermediate "Calling tool...", "Result: ...", then final answer |
+| **Tool UX** | Step messages: user sees intermediate "Calling tool...", "Result: ...", then final answer |
 | **Runtime** | Bun — local / long-running process |
