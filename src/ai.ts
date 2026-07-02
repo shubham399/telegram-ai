@@ -122,7 +122,7 @@ export async function processUserMessage(
   messages: ChatCompletionMessageParam[],
   entityId: string,
   existingSessionId: string | null,
-  onToolCall: (toolName: string) => void,
+  onToolCall: (toolName: string, args?: Record<string, unknown>) => void,
   onToolResult: (toolName: string, summary: string) => void,
   maxSteps: number = AGENT_MAX_STEPS,
   memoryStore?: MemoryStore,
@@ -192,7 +192,6 @@ export async function processUserMessage(
         model: MODEL,
         messages: apiMessages,
         tools: customOpenAITools.length > 0 ? customOpenAITools : undefined,
-        max_tokens: 4096,
         stream: true,
       })
 
@@ -259,12 +258,12 @@ export async function processUserMessage(
           stepToolNames.push(toolName)
           const cleanName = toolName.includes('<|') ? toolName.split('<|')[0] : toolName
           log.info(`  Tool call: ${cleanName}(args=${maskPii(truncate(tc.function.arguments, 200))})`)
-          onToolCall(cleanName)
 
           let result: any
           try {
             if (toolName in customTools) {
               const args = JSON.parse(tc.function.arguments || '{}')
+              onToolCall(cleanName, args)
               result = await customTools[toolName].execute(args)
             } else {
               log.warn(`Unknown tool: ${toolName}`)

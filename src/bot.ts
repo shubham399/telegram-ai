@@ -149,21 +149,15 @@ export function createBot(sessionStore: SessionStore, conversationStore: Convers
           aiMessages,
           userId,
           existingSessionId,
-          (toolName: string) => {
+          (toolName: string, args?: Record<string, unknown>) => {
             msgLog.info(`Tool call: ${toolName}`)
-            if (!toolName.startsWith('COMPOSIO_')) {
-              ctx.reply(`🔧 Calling *${escapeMd(toolName)}*…`, { parse_mode: 'MarkdownV2', ...replyOpts }).catch(
-                () => msgLog.warn('Failed to send tool-call msg'),
-              )
+            const msg = toolUxMessage(toolName, args)
+            if (msg) {
+              ctx.reply(msg, replyOpts).catch(() => msgLog.warn('Failed to send tool-call msg'))
             }
           },
-          (toolName: string, summary: string) => {
-            msgLog.info(`Tool result: ${toolName} (${summary.length} chars)`)
-            if (!toolName.startsWith('COMPOSIO_')) {
-              ctx.reply(`📎 Result: ${escapeMd(summary)}`, { parse_mode: 'MarkdownV2', ...replyOpts }).catch(
-                () => msgLog.warn('Failed to send tool-result msg'),
-              )
-            }
+          (_toolName: string, _summary: string) => {
+            // suppress raw tool-result messages — UX handled in toolUxMessage/call
           },
           undefined,
           memoryStore,
@@ -262,6 +256,31 @@ export function createBot(sessionStore: SessionStore, conversationStore: Convers
   })
 
   return bot
+}
+
+function toolUxMessage(toolName: string, args?: Record<string, unknown>): string | null {
+  if (toolName === 'composio') {
+    const action = args?.action as string
+    const tool = args?.tool as string | undefined
+    const query = args?.query as string | undefined
+    if (action === 'search') {
+      return query?.toLowerCase().includes('gmail')
+        ? '🔍 Checking your Gmail...'
+        : '🔍 Looking up available services...'
+    }
+    if (action === 'execute') {
+      const upper = (tool ?? '').toUpperCase()
+      if (upper.includes('GMAIL')) return '📬 Fetching your emails...'
+      if (upper.includes('CALENDAR')) return '📅 Checking your calendar...'
+      if (upper.includes('GITHUB')) return '🐙 Checking GitHub...'
+      if (upper.includes('DRIVE')) return '📁 Checking Google Drive...'
+      return '⚙️ Running request...'
+    }
+    return '⚙️ Processing...'
+  }
+  if (toolName === 'memory') return null
+  if (toolName === 'compute') return null
+  return `🔧 ${toolName}…`
 }
 
 function escapeMd(text: string): string {
