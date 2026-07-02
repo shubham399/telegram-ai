@@ -1,0 +1,5 @@
+.env.local
+/data/sessions.db
+/node_modules
+/opencode.json
+/HANDOFF.md
