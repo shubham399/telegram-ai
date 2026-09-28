@@ -1,0 +1,6 @@
+{
+  "name": "email",
+  "description": "Reads, searches, drafts and summarises email.",
+  "keywords": ["email", "mail", "inbox", "gmail", "reply to", "forward"],
+  "tools": ["composio", "memory", "note", "search"]
+}

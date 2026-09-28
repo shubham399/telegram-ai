@@ -1,6 +1,13 @@
 import { type Database } from 'bun:sqlite'
 import { Logger } from './logger'
+import { maskUserId } from './pii'
 import { computeNextRunUTC } from './schedule-math'
+
+export interface JobCreation {
+  id: number
+  /** Ready-to-send confirmation text. */
+  message: string
+}
 
 export interface Job {
   id: number
@@ -34,7 +41,7 @@ export class JobStore {
     minute: number,
     dayOfWeek?: number,
     needsAi?: boolean,
-  ): string {
+  ): JobCreation {
     const now = new Date().toISOString()
     const nextRun = computeNextRunUTC(scheduleType, hour, minute, dayOfWeek)
     const nextRunStr = nextRun?.toISOString() ?? null
@@ -46,8 +53,13 @@ export class JobStore {
       [telegramUserId, task, scheduleType, hour, minute, dayOfWeek ?? null, needsAi ? 1 : 0, nextRunStr, now],
     )
     const id = (this.db.query('SELECT last_insert_rowid() as id').get() as { id: number }).id
-    this.log.info(`Job #${id} created for user ${telegramUserId}: ${scheduleType} at ${hour}:${minute} IST, nextRun=${nextRunStr}, needsAi=${needsAi ? 1 : 0}`)
-    return `Scheduled: ${scheduleType} at ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')} IST`
+    this.log.info(`Job #${id} created for user ${maskUserId(telegramUserId)}: ${scheduleType} at ${hour}:${minute} IST, nextRun=${nextRunStr}, needsAi=${needsAi ? 1 : 0}`)
+    // The id matters as much as the sentence: a caller that cannot reference the
+    // job it just made cannot cancel it, and the test suite cannot assert on it.
+    return {
+      id,
+      message: `Scheduled: ${scheduleType} at ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} IST (job #${id})`,
+    }
   }
 
   getDue(): Job[] {
@@ -106,7 +118,7 @@ export class JobStore {
       : this.db.query('SELECT id, task FROM scheduled_jobs WHERE id = ? AND active = 1').all(jobId) as { id: number; task: string }[]
     if (rows.length === 0) return null
     this.db.run('UPDATE scheduled_jobs SET active = 0, next_run_at = NULL WHERE id = ?', [jobId])
-    this.log.info(`Cancelled job #${jobId} by id: "${rows[0].task}"`)
+    this.log.info(`Cancelled job #${jobId} by id`)
     return `Cancelled job #${jobId}: "${rows[0].task}"`
   }
 
@@ -120,7 +132,7 @@ export class JobStore {
     const ids = rows.map(r => r.id)
     this.db.run(`UPDATE scheduled_jobs SET active = 0, next_run_at = NULL WHERE id IN (${ids.map(() => '?').join(',')})`, ids as any)
     const tasks = rows.map(r => `"${r.task}"`).join(', ')
-    this.log.info(`Cancelled jobs #${ids.join(', #')} for user ${telegramUserId}: ${tasks}`)
+    this.log.info(`Cancelled ${ids.length} job(s) #${ids.join(', #')} for user ${maskUserId(telegramUserId)}`)
     return `Cancelled: ${tasks}`
   }
 

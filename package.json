@@ -1,7 +1,7 @@
 {
   "name": "telegram-ai",
   "version": "0.1.0",
-  "description": "Telegram bot — whitelisted messages → AI → Composio tool execution",
+  "description": "Telegram bot \u2014 whitelisted messages \u2192 AI \u2192 Composio tool execution",
   "type": "module",
   "license": "MIT",
   "author": "",
@@ -13,9 +13,18 @@
     "url": ""
   },
   "homepage": "",
-  "keywords": ["telegram", "bot", "ai", "composio", "telegraf"],
+  "keywords": [
+    "telegram",
+    "bot",
+    "ai",
+    "composio",
+    "telegraf"
+  ],
   "scripts": {
     "dev": "bun run --watch src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun run test/run.ts",
+    "check": "bun run typecheck && bun run test",
     "start": "[ \"$NODE_ENV\" = \"production\" ] && pm2 start ecosystem.config.cjs --env production || bun run src/index.ts",
     "logs": "pm2 logs",
     "logs:tail": "pm2 logs --lines 50 --nostream",
@@ -26,11 +35,11 @@
   "dependencies": {
     "@composio/core": "^0.11.0",
     "@composio/openai": "^0.10.0",
-    "composio-core": "^0.5.39",
     "openai": "^6.45.0",
     "pm2": "^7.0.1",
     "telegraf": "^4.16.3",
-    "zod": "^3.24.0"
+    "zod": "^3.24.0",
+    "zod-to-json-schema": "^3.24.1"
   },
   "devDependencies": {
     "@types/bun": "^1.2.0",

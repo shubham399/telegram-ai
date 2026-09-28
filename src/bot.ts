@@ -5,18 +5,98 @@ import { SessionStore } from './session-store'
 import { MemoryStore } from './memory-store'
 import { ConversationStore } from './conversation-store'
 import type { JobStore } from './job-store'
-import { processUserMessage, summarizeConversation } from './ai'
-import { startScheduler } from './scheduler'
-import { maskPii } from './pii'
+import { processUserMessage } from './ai'
+import { summarizeConversation, messagesTokens } from './history'
+import { maskPii, maskUserId } from './pii'
+import { userQueue } from './queue'
+import { agents } from './agents'
+import { UserState, KEY_SESSION, KEY_AGENT, KEY_MODEL, DEFAULT_SESSION } from './user-state'
+import type { ConversationScope } from './conversation-store'
+import { createRequest, cancelFor, isCancelled, markFinished } from './request-registry'
+import { router } from './model-router'
+import type { LoopStore } from './loop-store'
+import type { NoteStore } from './note-store'
+import type { TodoStore } from './todo-store'
+import type { UsageLedger } from './usage-ledger'
+import type { Maintenance } from './maintenance'
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions'
 
 const log = new Logger('bot')
 
-export function createBot(sessionStore: SessionStore, conversationStore: ConversationStore, memoryStore?: MemoryStore, jobStore?: JobStore) {
+export interface BotDeps {
+  sessionStore: SessionStore
+  conversationStore: ConversationStore
+  userState: UserState
+  loopStore: LoopStore
+  noteStore: NoteStore
+  todoStore: TodoStore
+  usageLedger: UsageLedger
+  maintenance: Maintenance
+  memoryStore?: MemoryStore
+  jobStore?: JobStore
+}
+
+export function createBot(deps: BotDeps) {
+  const {
+    sessionStore,
+    conversationStore,
+    userState,
+    loopStore,
+    noteStore,
+    todoStore,
+    usageLedger,
+    maintenance,
+    memoryStore,
+    jobStore,
+  } = deps
+
   const bot = new Telegraf(env.TELEGRAM_BOT_TOKEN)
   const SESSION_TIMEOUT_MS = 10 * 60 * 1000
-  const MAX_CONV_MESSAGES = 20
   const convLog = log.child('conversations')
+
+  /**
+   * Compaction budget. Token-based rather than message-count based because the
+   * two things that actually blow up a conversation are a single 16k-char tool
+   * result and a long assistant reply — both of which are 2 messages, not 20.
+   */
+  const CONV_TOKEN_BUDGET = 60_000
+  const CONV_KEEP_RECENT = 10
+
+  /** A clarify awaiting a button press. Bounded by TTL so it cannot leak. */
+  const pendingClarify = new Map<string, { options: string[]; messageId: number; at: number }>()
+  setInterval(() => {
+    const cutoff = Date.now() - 15 * 60 * 1000
+    for (const [userId, entry] of pendingClarify) {
+      if (entry.at < cutoff) pendingClarify.delete(userId)
+    }
+  }, 60_000).unref()
+
+  const newSessionId = (): string =>
+    `${new Date().toISOString().slice(0, 10)}-${Math.random().toString(36).slice(2, 6)}`
+
+  /** The conversation this turn belongs to. */
+  const scopeFor = (userId: string): ConversationScope => ({
+    sessionId: userState.get(userId, KEY_SESSION) ?? DEFAULT_SESSION,
+    agentName: userState.get(userId, KEY_AGENT) ?? 'default',
+  })
+
+  /**
+   * Pick the agent for a turn: an explicit `/agent` pin wins, otherwise the
+   * specialist whose keywords match.
+   */
+  function routeAgent(userId: string, text: string): string {
+    const pinned = userState.get(userId, KEY_AGENT)
+    if (pinned && agents.has(pinned)) {
+      log.debug(`Pinned agent "${pinned}" for ${maskUserId(userId)}`)
+      return pinned
+    }
+    const matched = agents.select(text)
+    if (matched) {
+      log.info(`Routed ${maskUserId(userId)} to agent "${matched.name}"`)
+      return matched.name
+    }
+    return 'default'
+  }
 
   bot.use((ctx: Context, next) => {
     const userId = ctx.from?.id?.toString()
@@ -25,7 +105,7 @@ export function createBot(sessionStore: SessionStore, conversationStore: Convers
       ctx.reply('You are not authorized to use this bot.').catch(() => {})
       return
     }
-    log.debug(`Whitelist pass: user ${userId}`)
+    log.debug(`Whitelist pass: user ${maskUserId(userId)}`)
     return next()
   })
 
@@ -70,8 +150,8 @@ export function createBot(sessionStore: SessionStore, conversationStore: Convers
       const totalMin = now.getUTCHours() * 60 + now.getUTCMinutes() + offsetMinutes
       const hour = Math.floor(totalMin / 60) % 24
       const minute = totalMin % 60
-      const result = jobStore.create(uid, task, 'once', hour, minute, undefined, false)
-      log.info(`Direct scheduling: "${text}" -> once at ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} IST, task="${task}"`)
+      const result = jobStore.create(uid, task, 'once', hour, minute, undefined, false).message
+      log.info(`Direct scheduling: "${maskPii(text.slice(0, 120))}" -> once at ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} IST`)
       return { handled: true, reply: `✅ ${result}` }
     }
 
@@ -83,8 +163,8 @@ export function createBot(sessionStore: SessionStore, conversationStore: Convers
       const task = remindAtMatch[4]?.trim() || 'reminder'
       if (meridian?.toLowerCase() === 'pm' && hour < 12) hour += 12
       if (meridian?.toLowerCase() === 'am' && hour === 12) hour = 0
-      const result = jobStore.create(uid, task, 'once', hour, minute, undefined, false)
-      log.info(`Direct scheduling: "${text}" -> once at ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} IST, task="${task}"`)
+      const result = jobStore.create(uid, task, 'once', hour, minute, undefined, false).message
+      log.info(`Direct scheduling: "${maskPii(text.slice(0, 120))}" -> once at ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} IST`)
       return { handled: true, reply: `✅ ${result}` }
     }
 
@@ -99,24 +179,54 @@ export function createBot(sessionStore: SessionStore, conversationStore: Convers
       const totalMin = now.getUTCHours() * 60 + now.getUTCMinutes() + offsetMinutes
       const hour = Math.floor(totalMin / 60) % 24
       const minute = totalMin % 60
-      const result = jobStore.create(uid, task, 'once', hour, minute, undefined, true)
-      log.info(`Direct scheduling (generic): "${text}" -> once at ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} IST, needsAi=true, task="${task}"`)
+      const result = jobStore.create(uid, task, 'once', hour, minute, undefined, true).message
+      log.info(`Direct scheduling (generic): "${maskPii(text.slice(0, 120))}" -> once at ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} IST, needsAi=true`)
       return { handled: true, reply: `✅ Scheduled "${task}" for ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} IST. I'll work on it then.` }
     }
 
     if (lower.startsWith('remind me') || lower.startsWith('remind me to')) {
-      log.warn(`Direct scheduling: unparseable remind request — "${text}"`)
+      log.warn(`Direct scheduling: unparseable remind request — "${maskPii(text.slice(0, 120))}"`)
     }
 
     return { handled: false }
   }
 
+  /**
+   * Fold the older half of a conversation into its rolling summary once the
+   * token budget is exceeded. Never throws — a failed compaction just means we
+   * try again next turn.
+   */
+  async function compactIfNeeded(userId: string, scope: ConversationScope): Promise<void> {
+    const stored = conversationStore.list(userId, scope)
+    if (stored.length <= CONV_KEEP_RECENT) return
+
+    if (messagesTokens(stored) <= CONV_TOKEN_BUDGET) return
+
+    // Keep the newest half so the tail of the conversation survives verbatim.
+    const keepLast = Math.max(CONV_KEEP_RECENT, Math.floor(stored.length / 2))
+    const dropped = stored.slice(0, stored.length - keepLast)
+
+    try {
+      const summary = await summarizeConversation(dropped, conversationStore.getSummary(userId, scope) ?? undefined)
+      if (!summary) {
+        convLog.warn(`Compaction produced no summary for ${maskUserId(userId)}; leaving history intact`)
+        return
+      }
+      conversationStore.compact(userId, scope, keepLast, summary)
+    } catch (err) {
+      convLog.warn(`Compaction failed for ${maskUserId(userId)}: ${err}`)
+    }
+  }
+
   async function processTextMessage(ctx: Context, userId: string, text: string, replyOpts: object) {
-    const msgLog = log.child(`user:${userId}`)
+    const msgLog = log.child(`user:${maskUserId(userId)}`)
 
     const typingInterval = setInterval(() => {
       ctx.sendChatAction('typing').catch(() => clearInterval(typingInterval))
     }, 4000)
+
+    const request = { id: '' }
+    let loopId = ''
 
     try {
       msgLog.info(`Received: "${maskPii(text.slice(0, 100))}"`)
@@ -131,12 +241,20 @@ export function createBot(sessionStore: SessionStore, conversationStore: Convers
 
       const existingRow = sessionStore.get(userId, SESSION_TIMEOUT_MS)
       const existingSessionId = existingRow?.composioSessionId ?? null
-      msgLog.info(`Session: ${existingSessionId ? existingSessionId : 'new (none found)'}`)
-      // Session gone (new user or timed out) means composio tool context is stale — drop conversation history with it.
-      if (!existingSessionId) conversationStore.clear(userId)
+      msgLog.info(`Composio session: ${existingSessionId ? 'reusing' : 'new (none found)'}`)
 
-      const storedHistory = conversationStore.list(userId)
-      msgLog.debug(`History before: ${storedHistory.length} entries`)
+      // The composio session and the conversation are unrelated lifetimes. A
+      // session that timed out server-side says nothing about the user's history,
+      // and the runner already mints a fresh session when reuse is rejected. This
+      // used to delete the whole conversation whenever the row expired.
+      const scope = scopeFor(userId)
+      const agentName = routeAgent(userId, text)
+      const loopId = loopStore.start(userId, scope, `${request.id}-${agentName}`)
+      const modelOverride = userState.get(userId, KEY_MODEL) ?? undefined
+      msgLog.debug(`Scope: session=${scope.sessionId} agent=${agentName}`)
+
+      const storedHistory = conversationStore.listWithSummary(userId, scope)
+      msgLog.debug(`History before: ${storedHistory.length} entries, ~${messagesTokens(storedHistory)} tokens`)
 
       const aiMessages: ChatCompletionMessageParam[] = [
         ...storedHistory,
@@ -145,44 +263,77 @@ export function createBot(sessionStore: SessionStore, conversationStore: Convers
 
       try {
         msgLog.info('Calling processUserMessage')
-        const { text: finalText, messages: updatedMessages, composioSessionId, totalSteps, finishReason, lastToolResult } = await processUserMessage(
-          aiMessages,
-          userId,
+        const created = createRequest(userId, (ctx.message as any)?.message_id)
+        request.id = created.id
+        const { text: finalText, messages: updatedMessages, composioSessionId, totalSteps, finishReason, lastToolResult } = await processUserMessage({
+          messages: aiMessages,
+          entityId: userId,
           existingSessionId,
-          (toolName: string, args?: Record<string, unknown>) => {
+          agentName,
+          model: modelOverride,
+          requestId: request.id,
+          // Checkpoint so a crash mid-run resumes instead of restarting. Stale
+          // loops from a previous process are finished, not resumed here: the
+          // bot owns an interactive turn, and resuming would double-answer.
+          checkpoint: { onStep: (step, messages) => loopStore.record(loopId, step, messages) },
+          noteStore,
+          todoStore,
+          usageLedger,
+          maintenance,
+          onToolCall: (toolName: string, args?: Record<string, unknown>) => {
             msgLog.info(`Tool call: ${toolName}`)
             const msg = toolUxMessage(toolName, args)
             if (msg) {
               ctx.reply(msg, replyOpts).catch(() => msgLog.warn('Failed to send tool-call msg'))
             }
           },
-          (_toolName: string, _summary: string) => {
+          onToolResult: (_toolName: string, _summary: string) => {
             // suppress raw tool-result messages — UX handled in toolUxMessage/call
           },
-          undefined,
           memoryStore,
           jobStore,
-        )
+        })
 
         msgLog.info(`Composio session: ${composioSessionId}`)
         msgLog.info(`Agent completed: ${totalSteps} steps, finish=${finishReason}`)
         sessionStore.upsert(userId, composioSessionId)
 
-        const newToStore = updatedMessages.slice(storedHistory.length)
-        conversationStore.append(userId, newToStore)
-
-        const totalCount = conversationStore.count(userId)
-        if (totalCount > MAX_CONV_MESSAGES) {
-          const excess = conversationStore.list(userId).slice(0, totalCount - MAX_CONV_MESSAGES)
-          summarizeConversation(excess)
-            .then(summary => conversationStore.compact(userId, MAX_CONV_MESSAGES, summary))
-            .catch(e => convLog.warn(`Compaction failed for ${userId}: ${e}`))
+        if (isCancelled(request.id)) {
+          msgLog.warn('Run was cancelled by /stop; discarding partial history')
+          if (loopId) loopStore.finish(loopId, 'failed')
+        } else {
+          const newToStore = updatedMessages.slice(storedHistory.length)
+          conversationStore.append(userId, scope, newToStore)
         }
-        convLog.debug(`Conversation ${userId}: now ${totalCount} entries`)
+
+        // Awaited on purpose: fire-and-forget compaction used to race the next
+        // message, so history could exceed the budget indefinitely.
+        await compactIfNeeded(userId, scope)
+        convLog.debug(`Conversation ${maskUserId(userId)}: now ${conversationStore.count(userId, scope)} entries`)
 
         clearInterval(typingInterval)
 
         if (finalText) {
+          // A clarify() turn renders as tappable buttons; anything else is prose.
+          const clarify = parseClarify(finalText)
+          if (clarify) {
+            msgLog.info(`Rendering clarify with ${clarify.options.length} option(s)`)
+            pendingClarify.set(userId, {
+              options: clarify.options,
+              messageId: (ctx.message as any)?.message_id,
+              at: Date.now(),
+            })
+            await ctx.reply(`❓ ${clarify.question}`, {
+              ...replyOpts,
+              reply_markup: {
+                inline_keyboard: clarify.options.map((option, i) => [
+                  { text: option, callback_data: `clarify:${i}` },
+                ]),
+              },
+            })
+            return
+          }
+
           const outputCheck = sanitizeOutput(finalText)
           if (outputCheck.flagged) {
             msgLog.warn(`Output leak detected: ${outputCheck.pattern}`)
@@ -197,12 +348,16 @@ export function createBot(sessionStore: SessionStore, conversationStore: Convers
           await ctx.reply('Done! What else can I help with?', replyOpts)
         }
 
+        if (loopId) loopStore.finish(loopId, 'done')
         sessionStore.updateActivity(userId)
         msgLog.info('Message processed successfully')
       } finally {
+        markFinished(userId, request.id)
         clearInterval(typingInterval)
       }
     } catch (err) {
+      if (request.id) markFinished(userId, request.id)
+      if (loopId) loopStore.finish(loopId, 'failed')
       msgLog.error('Error processing message')
       const message = err instanceof Error ? err.message : 'Unknown error'
       await ctx.reply(`⚠️ Error: ${message}`, replyOpts).catch(
@@ -211,40 +366,152 @@ export function createBot(sessionStore: SessionStore, conversationStore: Convers
     }
   }
 
-  bot.on('text', async (ctx: Context) => {
+  /**
+   * Commands that need no model. Kept as a table so a new one is a single entry
+   * rather than another `if` in the hot path.
+   */
+  const COMMANDS: Record<string, (ctx: Context, userId: string, arg: string) => Promise<unknown>> = {
+    '/start': async ctx => {
+      return ctx.reply(
+        'Hi! Send me any message and I\'ll use my tools to help you.\n\n' +
+        '/new — fresh conversation\n' +
+        '/session — show or switch sessions\n' +
+        '/clear — wipe this conversation\n' +
+        '/agent — pin or unpin a specialist\n' +
+        '/model — override the model\n' +
+        '/stop — cancel what I am doing',
+      )
+    },
+
+    '/new': async (ctx, userId) => {
+      const id = newSessionId()
+      userState.set(userId, KEY_SESSION, id)
+      log.info(`New session for ${maskUserId(userId)}: ${id}`)
+      return ctx.reply('🆕 New conversation. What are we working on?')
+    },
+
+    '/session': async (ctx, userId, arg) => {
+      const wanted = arg.trim()
+      if (!wanted) {
+        const current = userState.get(userId, KEY_SESSION) ?? DEFAULT_SESSION
+        return ctx.reply(`Current session: \`${current}\`\nUse \`/session <name>\` to switch.`)
+      }
+      if (wanted === 'default') userState.delete(userId, KEY_SESSION)
+      else userState.set(userId, KEY_SESSION, wanted)
+      log.info(`Session switch for ${maskUserId(userId)}: ${wanted}`)
+      return ctx.reply(`Switched to session \`${wanted}\`.`)
+    },
+
+    '/clear': async (ctx, userId) => {
+      const scope = scopeFor(userId)
+      conversationStore.clear(userId, scope)
+      return ctx.reply('🧹 Cleared this conversation.')
+    },
+
+    '/agent': async (ctx, userId, arg) => {
+      const wanted = arg.trim().toLowerCase()
+      if (!wanted || wanted === 'list') {
+        const pinned = userState.get(userId, KEY_AGENT) ?? 'default'
+        const lines = agents.list().map(a => `\`${a.name}\`${a.name === pinned ? ' ← pinned' : ''} — ${a.description}`)
+        return ctx.reply(`🤖 Agents (pinned: \`${pinned}\`)\n${lines.join('\n')}\n\nUse \`/agent <name>\` or \`/agent auto\` to unpin.`)
+      }
+      if (wanted === 'auto') {
+        userState.delete(userId, KEY_AGENT)
+        return ctx.reply('🤖 Unpinned — I will pick the agent per message.')
+      }
+      if (!agents.has(wanted)) {
+        return ctx.reply(`Unknown agent \`${wanted}\`. Available: ${agents.names.join(', ')}`)
+      }
+      userState.set(userId, KEY_AGENT, wanted)
+      log.info(`Pinned agent "${wanted}" for ${maskUserId(userId)}`)
+      return ctx.reply(`🤖 Pinned to \`${wanted}\`.`)
+    },
+
+    '/model': async (ctx, userId, arg) => {
+      const wanted = arg.trim()
+      if (!wanted) {
+        const current = userState.get(userId, KEY_MODEL)
+        return ctx.reply(`Model: \`${current ?? router.activeModel}\` (default). Use \`/model reset\` to clear.`)
+      }
+      if (wanted === 'reset') userState.delete(userId, KEY_MODEL)
+      else userState.set(userId, KEY_MODEL, wanted)
+      return ctx.reply(`Model set to \`${wanted}\`.`)
+    },
+
+    '/stop': async (ctx, userId) => {
+      const stopped = cancelFor(userId)
+      return ctx.reply(stopped ? '🛑 Stopping.' : 'Nothing is running right now.')
+    },
+  }
+
+  bot.on('text', (ctx: Context) => {
     const userId = ctx.from!.id.toString()
     const text = (ctx.message as any).text
 
-    if (text === '/start') {
-      log.info(`User ${userId} sent /start`)
-      await ctx.reply('Hi! Send me any message and I\'ll use my tools to help you.')
-      return
+    // Commands resolve before anything else: no queue, no typing indicator, no
+    // model. They must work even while an agent run is in flight.
+    const [maybeCommand, ...rest] = text.trim().split(/\s+/)
+    const handler = maybeCommand?.toLowerCase()
+    if (handler && Object.prototype.hasOwnProperty.call(COMMANDS, handler)) {
+      log.debug(`Command ${handler} from ${maskUserId(userId)}`)
+      return Promise.resolve(COMMANDS[handler](ctx, userId, rest.join(' '))).catch(err =>
+        log.error(`Command ${handler} failed: ${err instanceof Error ? err.message : err}`),
+      )
     }
 
     const sanitized = sanitizeInput(text)
     if (sanitized.flagged) {
-      log.warn(`Injection attempt from ${userId}: pattern="${sanitized.pattern}", text="${maskPii(text.slice(0, 200))}"`)
+      log.warn(`Injection attempt from ${maskUserId(userId)}: pattern="${sanitized.pattern}", text="${maskPii(text.slice(0, 200))}"`)
     }
 
     const originalMessageId = (ctx.message as any).message_id
     const replyOpts = { reply_parameters: { message_id: originalMessageId } }
 
-    await processTextMessage(ctx, userId, text, replyOpts)
+    // Deliberately not awaited: the agent run can take minutes, and holding the
+    // update pipeline open would block every other user's message. The queue keeps
+    // this user's own turns in order.
+    void userQueue.enqueue(userId, () => processTextMessage(ctx, userId, text, replyOpts))
+      .catch(err => log.error(`Queued turn failed for ${maskUserId(userId)}: ${err}`))
   })
 
-  bot.on('sticker', async (ctx: Context) => {
+  bot.on('sticker', (ctx: Context) => {
     const userId = ctx.from!.id.toString()
     const emoji = (ctx.message as any).sticker?.emoji ?? null
     const text = emoji ?? '[Sticker]'
     const originalMessageId = (ctx.message as any).message_id
     const replyOpts = { reply_parameters: { message_id: originalMessageId } }
 
-    await processTextMessage(ctx, userId, text, replyOpts)
+    void userQueue.enqueue(userId, () => processTextMessage(ctx, userId, text, replyOpts))
+      .catch(err => log.error(`Queued sticker turn failed for ${maskUserId(userId)}: ${err}`))
   })
 
-  if (jobStore) {
-    startScheduler(jobStore)
-  }
+  /**
+   * Answer buttons for `clarify`. The chosen index is mapped back to the option
+   * text in `pendingClarify`, keyed by user, and fed to the agent as a normal turn
+   * — a callback query cannot drive the agent loop itself, and routing it through
+   * the normal path keeps one code path for conversation history.
+   */
+  bot.action(/^clarify:(\d+)$/, async (ctx: Context) => {
+    const userId = ctx.from!.id.toString()
+    const index = Number(((ctx as any).match as RegExpMatchArray)[1])
+    const pending = pendingClarify.get(userId)
+    if (!pending) {
+      await ctx.answerCbQuery('That question has expired — ask me again.')
+      return
+    }
+    const option = pending.options[index]
+    pendingClarify.delete(userId)
+    await ctx.answerCbQuery()
+    if (!option) {
+      await ctx.reply('That option is no longer available.')
+      return
+    }
+    log.info(`User ${maskUserId(userId)} answered clarify with option ${index}`)
+    const replyOpts = { reply_parameters: { message_id: pending.messageId } }
+    void userQueue
+      .enqueue(userId, () => processTextMessage(ctx, userId, option, replyOpts))
+      .catch(err => log.error(`Clarified turn failed for ${maskUserId(userId)}: ${err}`))
+  })
 
   bot.catch((err: unknown) => {
     const msg = err instanceof Error ? err.message : String(err)
@@ -260,6 +527,24 @@ export function createBot(sessionStore: SessionStore, conversationStore: Convers
   })
 
   return bot
+}
+
+const CLARIFY_RE = /^CLARIFY:\s*(.+?)\n\n((?:\d+\.\s.+\n?)+)/
+
+/**
+ * Recognise the `clarify` tool's return value so it can be shown as buttons rather
+ * than as a wall of text. Returns null for ordinary replies.
+ */
+function parseClarify(text: string): { question: string; options: string[] } | null {
+  const match = text.match(CLARIFY_RE)
+  if (!match) return null
+  const options = match[2]
+    .split('\n')
+    .map(line => line.replace(/^\d+\.\s*/, '').trim())
+    .filter(Boolean)
+    .slice(0, 4)
+  if (options.length < 2) return null
+  return { question: match[1].trim(), options }
 }
 
 function toolUxMessage(toolName: string, args?: Record<string, unknown>): string | null {

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { Logger } from '../logger'
+import { maskUserId, maskPii } from '../pii'
 import type { CustomToolDef, ToolContext } from '../tool-def'
 
 const log = new Logger('tool:composio')
@@ -21,7 +22,7 @@ export function createTool(ctx: ToolContext): CustomToolDef | null {
     execute: async ({ action, query, tool, args }) => {
       if (action === 'search') {
         if (!query) return 'query required for search'
-        log.info(`tool composio: search query="${query}"`)
+        log.info(`tool composio: search query="${maskPii(query)}"`)
         try {
           const res = await session.search({ query })
           if (!res.success) return `Search error: ${res.error ?? 'unknown error'}`
@@ -59,7 +60,12 @@ export function createTool(ctx: ToolContext): CustomToolDef | null {
         }
       } else if (action === 'execute') {
         if (!tool) return 'tool slug required for execute'
-        log.info(`tool composio: execute tool="${tool}" args=${JSON.stringify(args ?? {})}`)
+        // Args routinely carry message bodies, recipients, search queries and
+        // file contents. Log the *shape* of the call, never the payload.
+        const argKeys = Object.keys(args ?? {})
+        log.info(
+          `tool composio: execute tool="${tool}" argKeys=[${argKeys.join(',')}] for ${maskUserId(ctx.entityId)}`,
+        )
         try {
           const result = await session.execute(tool, args ?? {})
           const data = typeof result === 'object' && result !== null ? (result as any).data ?? result : result

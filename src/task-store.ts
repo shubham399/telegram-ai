@@ -94,6 +94,24 @@ export class TaskStore {
     return row.c > 0
   }
 
+  /**
+   * Requeue every INPROGRESS task back to NEW.
+   *
+   * Called once at boot: an INPROGRESS row can only belong to a process that is
+   * no longer running, so it is always safe to retry. This is the whole of the
+   * scheduler's crash recovery — no heartbeat, no lease, no timeout sweep.
+   */
+  requeueInProgress(): number {
+    return this.db.run("UPDATE scheduled_tasks SET status = 'NEW' WHERE status = 'INPROGRESS'").changes
+  }
+
+  /** Same as {@link requeueInProgress} for a single task that overran its budget. */
+  requeueInProgressFor(taskId: number): number {
+    return this.db.run("UPDATE scheduled_tasks SET status = 'NEW' WHERE id = ? AND status = 'INPROGRESS'", [
+      taskId,
+    ]).changes
+  }
+
   cleanupDone(): number {
     const result = this.db.run("DELETE FROM scheduled_tasks WHERE status IN ('SUCCESS', 'FAILED')")
     const count = result.changes

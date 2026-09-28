@@ -1,5 +1,6 @@
 import { type Database } from 'bun:sqlite'
 import { Logger } from './logger'
+import { maskUserId } from './pii'
 
 export class MemoryStore {
   private log: Logger
@@ -26,7 +27,7 @@ export class MemoryStore {
          updated_at = excluded.updated_at`,
       [userId, key, value, now],
     )
-    this.log.info(`Memory set for user ${userId}: ${key}`)
+    this.log.info(`Memory set for user ${maskUserId(userId)}: ${key}`)
   }
 
   list(userId: string): Record<string, string> {
@@ -45,6 +46,6 @@ export class MemoryStore {
       'DELETE FROM user_memory WHERE telegram_user_id = ? AND key = ?',
       [userId, key],
     )
-    this.log.info(`Memory deleted for user ${userId}: ${key}`)
+    this.log.info(`Memory deleted for user ${maskUserId(userId)}: ${key}`)
   }
 }

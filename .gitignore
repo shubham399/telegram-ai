@@ -1,5 +1,8 @@
 .env.local
-/data/sessions.db
+# The whole directory, not just sessions.db: the WAL and SHM siblings and the
+# model-router's data/.fallback-active are runtime state too, and the database
+# holds real conversation history and Telegram user ids.
+/data/
 /node_modules
 /opencode.json
 /HANDOFF.md

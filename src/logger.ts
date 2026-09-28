@@ -1,5 +1,7 @@
 type LogLevel = 'ERROR' | 'WARN' | 'INFO' | 'DEBUG'
 
+import { inspect } from 'util'
+
 const LEVEL_NUM: Record<LogLevel, number> = { ERROR: 0, WARN: 1, INFO: 2, DEBUG: 3 }
 
 function parseLevel(s: string): LogLevel {
@@ -28,15 +30,14 @@ export class Logger {
   private emit(level: LogLevel, msg: string, ...args: unknown[]) {
     if (LEVEL_NUM[level] > this.levelNum) return
     const ts = new Date().toISOString()
-    const prefix = args.length > 0 ? `${msg}` : msg
-    const rest = args.length > 0 ? args : []
-    if (level === 'ERROR') {
-      console.error(`[${ts}] [${level}] [${this.label}] ${prefix}`, ...rest)
-    } else if (level === 'WARN') {
-      console.warn(`[${ts}] [${level}] [${this.label}] ${prefix}`, ...rest)
-    } else {
-      console.log(`[${ts}] [${level}] [${this.label}] ${prefix}`, ...rest)
-    }
+    const line = `[${ts}] [${level}] [${this.label}] ${msg}`
+    // Everything is interpolated into a single string before reaching console.
+    // Handing user-derived text to console.* as a format string lets a message
+    // containing %s swallow the following argument (and %d/%j corrupt the line).
+    const out = args.length ? `${line} ${args.map(a => (typeof a === 'string' ? a : inspect(a))).join(' ')}` : line
+    if (level === 'ERROR') console.error(out)
+    else if (level === 'WARN') console.warn(out)
+    else console.log(out)
   }
 
   error(msg: string, ...args: unknown[]) { this.emit('ERROR', msg, ...args) }

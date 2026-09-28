@@ -1,0 +1,6 @@
+{
+  "name": "researcher",
+  "description": "Researches topics on the web and reports findings with sources.",
+  "keywords": ["research", "look up", "find out", "who is", "compare"],
+  "tools": ["composio", "web", "search", "delegate_task"]
+}
