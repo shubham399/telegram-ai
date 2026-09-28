@@ -145,8 +145,6 @@ export interface CompleteResult {
   response: OpenAI.Chat.Completions.ChatCompletion
 }
 
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
-
 /**
  * A failed call plus how many provider requests it actually cost. The retry loop
  * is the only place that knows this, and guessing it from `retries` over-reports
@@ -213,10 +211,6 @@ export class ModelRouter {
     log.info('Fallback state cleared; primary model preferred')
   }
 
-  private config(): ModelConfig {
-    return this.usingFallback ? (this.fallback as ModelConfig) : this.primary
-  }
-
   /**
    * The config and client for this call, decided together.
    *
@@ -266,7 +260,7 @@ export class ModelRouter {
       if (i > 0) {
         const backoff = 500 * 2 ** (i - 1)
         log.warn(`${cfg.name} transient failure, retrying in ${backoff}ms [${i}/${cfg.retries}]`)
-        await sleep(backoff)
+        await Bun.sleep(backoff)
       }
       calls++
       try {

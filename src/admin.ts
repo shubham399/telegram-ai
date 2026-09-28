@@ -14,7 +14,3 @@ import { ADMIN_USER_IDS } from './config'
 export function isAdmin(userId: string): boolean {
   return ADMIN_USER_IDS.has(userId)
 }
-
-export function isAdminConfigured(): boolean {
-  return ADMIN_USER_IDS.size > 0
-}

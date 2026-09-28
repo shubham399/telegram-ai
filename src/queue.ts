@@ -9,23 +9,10 @@
  * So: enqueue and return. Work for a given key runs in order; different keys run
  * concurrently.
  */
-import { Logger } from './logger'
-
-const log = new Logger('queue')
 
 export class KeyedQueue {
   /** key -> tail of the chain currently queued or running for it */
   private tails = new Map<string, Promise<unknown>>()
-
-  get pendingKeys(): number {
-    return this.tails.size
-  }
-
-  depthFor(key: string): number {
-    return this.depths.get(key) ?? 0
-  }
-
-  private depths = new Map<string, number>()
 
   enqueue<T>(key: string, task: () => Promise<T>): Promise<T> {
     const previous = this.tails.get(key) ?? Promise.resolve()
@@ -35,17 +22,11 @@ export class KeyedQueue {
     const run = previous.then(task, task)
 
     const tracked = run.finally(() => {
-      const left = (this.depths.get(key) ?? 1) - 1
-      if (left <= 0) {
-        this.depths.delete(key)
-        this.tails.delete(key)
-      } else {
-        this.depths.set(key, left)
-      }
+      // Identity, not a count: only clear the key if this is still the tail.
+      if (this.tails.get(key) === tracked) this.tails.delete(key)
     })
 
     this.tails.set(key, tracked)
-    this.depths.set(key, (this.depths.get(key) ?? 0) + 1)
     return run
   }
 }

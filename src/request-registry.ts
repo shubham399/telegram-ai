@@ -10,19 +10,14 @@
 interface Entry {
   id: string
   userId: string
-  messageId: number | undefined
   cancelled: boolean
-  startedAt: number
 }
 
 const active = new Map<string, Entry>()
 
-let counter = 0
-const nextId = (): string => `${Date.now().toString(36)}-${(counter++).toString(36)}`
-
 /** Register a new run. One active run per user — the queue guarantees that. */
-export function createRequest(userId: string, messageId?: number): { id: string } {
-  const entry: Entry = { id: nextId(), userId, messageId, cancelled: false, startedAt: Date.now() }
+export function createRequest(userId: string): { id: string } {
+  const entry: Entry = { id: crypto.randomUUID(), userId, cancelled: false }
   active.set(userId, entry)
   return { id: entry.id }
 }
@@ -45,13 +40,4 @@ export function isCancelled(id: string): boolean {
     if (entry.id === id) return entry.cancelled
   }
   return false
-}
-
-export function isRunning(userId: string): boolean {
-  return active.has(userId)
-}
-
-/** Diagnostic only — counts, never contents. */
-export function activeCount(): number {
-  return active.size
 }

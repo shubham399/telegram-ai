@@ -1,21 +1,16 @@
 import { type Database } from 'bun:sqlite'
 import { Logger } from './logger'
 import { maskUserId, maskSessionId } from './pii'
-import { getDb } from './db'
+/** All three callers read only `composioSessionId`, so that is all this returns. */
 export interface SessionRow {
-  telegramUserId: string
   composioSessionId: string
-  createdAt: string
-  lastActivityAt: string
 }
 
 export class SessionStore {
-  db: Database
   private log: Logger
 
-  constructor(db?: Database) {
+  constructor(private db: Database) {
     this.log = new Logger('session-store')
-    this.db = db ?? getDb()
   }
 
   get(userId: string, timeoutMs: number): SessionRow | null {
@@ -34,12 +29,7 @@ export class SessionStore {
       return null
     }
     this.log.debug(`Session found for user ${maskUserId(userId)}: ${maskSessionId(row.composio_session_id)}`)
-    return {
-      telegramUserId: row.telegram_user_id,
-      composioSessionId: row.composio_session_id,
-      createdAt: row.created_at,
-      lastActivityAt: row.last_activity_at,
-    }
+    return { composioSessionId: row.composio_session_id }
   }
 
   upsert(userId: string, sessionId: string): void {

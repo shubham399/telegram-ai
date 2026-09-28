@@ -25,6 +25,10 @@ export interface Job {
   createdAt: string
 }
 
+const COLS = `id, telegram_user_id AS telegramUserId, task, schedule_type AS scheduleType,
+                hour, minute, day_of_week AS dayOfWeek, timezone, needs_ai AS needsAi,
+                next_run_at AS nextRunAt, last_run_at AS lastRunAt, active, created_at AS createdAt`
+
 export class JobStore {
   private log: Logger
 
@@ -65,10 +69,8 @@ export class JobStore {
   getDue(): Job[] {
     const now = new Date().toISOString()
     const rows = this.db
-      .query(`SELECT id, telegram_user_id AS telegramUserId, task, schedule_type AS scheduleType,
-                     hour, minute, day_of_week AS dayOfWeek, timezone, needs_ai AS needsAi,
-                     next_run_at AS nextRunAt, last_run_at AS lastRunAt, active, created_at AS createdAt
-              FROM scheduled_jobs WHERE active = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
+      .query(`SELECT ${COLS} FROM scheduled_jobs
+              WHERE active = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
               ORDER BY next_run_at`)
       .all(now) as Job[]
     return rows
@@ -104,18 +106,16 @@ export class JobStore {
 
   listByUser(telegramUserId: string): Job[] {
     return this.db
-      .query(`SELECT id, telegram_user_id AS telegramUserId, task, schedule_type AS scheduleType,
-                     hour, minute, day_of_week AS dayOfWeek, timezone, needs_ai AS needsAi,
-                     next_run_at AS nextRunAt, last_run_at AS lastRunAt, active, created_at AS createdAt
-              FROM scheduled_jobs WHERE telegram_user_id = ? AND active = 1
-              ORDER BY next_run_at`)
+      .query(`SELECT ${COLS} FROM scheduled_jobs
+              WHERE telegram_user_id = ? AND active = 1 ORDER BY next_run_at`)
       .all(telegramUserId) as Job[]
   }
 
   cancelById(jobId: number, telegramUserId?: string): string | null {
-    const rows = telegramUserId
-      ? this.db.query('SELECT id, task FROM scheduled_jobs WHERE id = ? AND telegram_user_id = ? AND active = 1').all(jobId, telegramUserId) as { id: number; task: string }[]
-      : this.db.query('SELECT id, task FROM scheduled_jobs WHERE id = ? AND active = 1').all(jobId) as { id: number; task: string }[]
+    const rows = this.db
+      .query(`SELECT id, task FROM scheduled_jobs
+              WHERE id = ? AND active = 1 ${telegramUserId ? 'AND telegram_user_id = ?' : ''}`)
+      .all(...(telegramUserId ? [jobId, telegramUserId] : [jobId])) as { id: number; task: string }[]
     if (rows.length === 0) return null
     this.db.run('UPDATE scheduled_jobs SET active = 0, next_run_at = NULL WHERE id = ?', [jobId])
     this.log.info(`Cancelled job #${jobId} by id`)

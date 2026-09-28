@@ -15,16 +15,11 @@ import { runMigrations } from './migrate'
 const log = new Logger('db')
 
 let handle: Database | null = null
-let handlePath = ''
 
-export function getDb(path = 'data/sessions.db'): Database {
-  if (handle) {
-    if (handlePath !== path) {
-      log.warn(`getDb('${path}') ignored — connection already open on '${handlePath}'`)
-    }
-    return handle
-  }
+export function getDb(): Database {
+  if (handle) return handle
 
+  const path = 'data/sessions.db'
   const db = new Database(path)
   // WAL: readers don't block the writer.
   db.run('PRAGMA journal_mode=WAL')
@@ -38,7 +33,6 @@ export function getDb(path = 'data/sessions.db'): Database {
   runMigrations(db)
 
   handle = db
-  handlePath = path
   log.info(`Database ready at ${path}`)
   return db
 }
@@ -57,6 +51,5 @@ export function closeDb(): void {
     log.warn(`DB close failed: ${err}`)
   }
   handle = null
-  handlePath = ''
   log.info('Database closed')
 }

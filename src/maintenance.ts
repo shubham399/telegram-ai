@@ -13,39 +13,31 @@ const log = new Logger('maintenance')
 
 const MS_PER_DAY = 86_400_000
 
-export interface MaintenanceOptions {
-  /** Conversation rows older than this are removed. */
-  conversationRetentionDays?: number
-  /** Usage rows older than this are removed. */
-  usageRetentionDays?: number
-  /** Inactive scopes older than this are removed. */
-  sessionRetentionDays?: number
-  /** Runs at most this often, no matter how often it is called. */
-  intervalMs?: number
-}
-
-const DEFAULTS = {
-  conversationRetentionDays: 30,
-  usageRetentionDays: 90,
-  sessionRetentionDays: 7,
-  intervalMs: 24 * 60 * 60 * 1000,
-}
-
 export class Maintenance {
   private lastRun = 0
+  private readonly conversationRetentionDays: number
+  private readonly usageRetentionDays: number
+  private readonly sessionRetentionDays: number
+  private readonly intervalMs: number
 
   constructor(
     private db: Database,
-    private options: MaintenanceOptions = {},
-  ) {}
-
-  private get settings() {
-    return { ...DEFAULTS, ...this.options }
+    options: {
+      conversationRetentionDays?: number
+      usageRetentionDays?: number
+      sessionRetentionDays?: number
+      intervalMs?: number
+    } = {},
+  ) {
+    this.conversationRetentionDays = options.conversationRetentionDays ?? 30
+    this.usageRetentionDays = options.usageRetentionDays ?? 90
+    this.sessionRetentionDays = options.sessionRetentionDays ?? 7
+    this.intervalMs = options.intervalMs ?? 24 * 60 * 60 * 1000
   }
 
-  /** Throttle wrapper. Returns false when the previous run was too recent. */
-  due(now = Date.now()): boolean {
-    return now - this.lastRun >= this.settings.intervalMs
+  /** Throttle: false when the previous run was too recent. */
+  private due(now: number): boolean {
+    return now - this.lastRun >= this.intervalMs
   }
 
   /**
@@ -64,13 +56,11 @@ export class Maintenance {
     }
     this.lastRun = now
 
-    const { conversationRetentionDays, usageRetentionDays, sessionRetentionDays } = this.settings
-
-    const conversation = this.trim('conversation_messages', 'created_at', conversationRetentionDays)
-    const usage = this.trim('usage_ledger', 'created_at', usageRetentionDays)
+    const conversation = this.trim('conversation_messages', 'created_at', this.conversationRetentionDays)
+    const usage = this.trim('usage_ledger', 'created_at', this.usageRetentionDays)
 
     // A session scope nobody has touched in a week is dead weight.
-    const sessionCutoff = new Date(now - sessionRetentionDays * MS_PER_DAY).toISOString()
+    const sessionCutoff = new Date(now - this.sessionRetentionDays * MS_PER_DAY).toISOString()
     // Counted separately for the same reason as trim(): the FTS trigger shares the
     // connection's change counter, so `run().changes` over-reports here too.
     const sessionFilter =
@@ -92,7 +82,7 @@ export class Maintenance {
       log.debug(`session retention skipped: ${err}`)
     }
 
-    const orphans = this.purgeFtsOrphans()
+    this.purgeFtsOrphans()
 
     this.checkpoint()
 
@@ -158,13 +148,13 @@ export class Maintenance {
    * Truncate the WAL. Without this it grows for the life of the process and every
    * read has to walk it.
    */
-  checkpoint(mode: 'PASSIVE' | 'FULL' | 'TRUNCATE' = 'TRUNCATE'): void {
+  private checkpoint(): void {
     try {
-      this.db.run(`PRAGMA wal_checkpoint(${mode})`)
-      log.debug(`WAL checkpointed (${mode})`)
+      this.db.run('PRAGMA wal_checkpoint(TRUNCATE)')
+      log.debug('WAL checkpointed')
     } catch (err) {
-      // A checkpoint can fail if readers are active; PASSIVE is enough to move on.
-      log.debug(`wal_checkpoint(${mode}) skipped: ${err}`)
+      // A checkpoint can fail if a reader holds the WAL; maintenance just skips it.
+      log.debug(`wal_checkpoint skipped: ${err}`)
     }
   }
 

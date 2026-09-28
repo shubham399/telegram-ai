@@ -9,17 +9,6 @@ interface Migration {
   up: (db: Database) => void
 }
 
-/** Numeric-dot version compare, for feature checks against the host SQLite. */
-function compareSqliteVersion(a: string, b: string): number {
-  const pa = a.split('.').map(Number)
-  const pb = b.split('.').map(Number)
-  for (let i = 0; i < 3; i++) {
-    const d = (pa[i] ?? 0) - (pb[i] ?? 0)
-    if (d !== 0) return d
-  }
-  return 0
-}
-
 const migrations: Migration[] = [
   {
     version: 1,
@@ -340,7 +329,7 @@ const migrations: Migration[] = [
       // not, and there is no partial option: without it the triggers throw on the
       // first delete. Leave the old table in place so /search still works.
       const version = (db.query('SELECT sqlite_version() AS v').get() as { v: string }).v
-      if (compareSqliteVersion(version, '3.43.0') < 0) {
+      if (!Bun.semver.satisfies(version, '>=3.43.0')) {
         log.warn(`SQLite ${version} lacks contentless_delete (needs 3.43) — keeping the unlinked FTS index`)
         return
       }

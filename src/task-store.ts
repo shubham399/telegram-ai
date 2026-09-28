@@ -16,6 +16,11 @@ export interface Task {
   completedAt: string | null
 }
 
+const COLS = `id, job_id AS jobId, telegram_user_id AS telegramUserId, task_text AS taskText,
+                status, retry_count AS retryCount, max_retries AS maxRetries,
+                error_message AS errorMessage, result_text AS resultText,
+                created_at AS createdAt, started_at AS startedAt, completed_at AS completedAt`
+
 export class TaskStore {
   private log: Logger
 
@@ -37,32 +42,19 @@ export class TaskStore {
 
   getById(id: number): Task | null {
     return (this.db
-      .query(`SELECT id, job_id AS jobId, telegram_user_id AS telegramUserId, task_text AS taskText,
-                     status, retry_count AS retryCount, max_retries AS maxRetries,
-                     error_message AS errorMessage, result_text AS resultText,
-                     created_at AS createdAt, started_at AS startedAt, completed_at AS completedAt
-              FROM scheduled_tasks WHERE id = ?`)
+      .query(`SELECT ${COLS} FROM scheduled_tasks WHERE id = ?`)
       .get(id) as Task | undefined) ?? null
   }
 
   getNew(): Task[] {
     return this.db
-      .query(`SELECT id, job_id AS jobId, telegram_user_id AS telegramUserId, task_text AS taskText,
-                     status, retry_count AS retryCount, max_retries AS maxRetries,
-                     error_message AS errorMessage, result_text AS resultText,
-                     created_at AS createdAt, started_at AS startedAt, completed_at AS completedAt
-              FROM scheduled_tasks WHERE status = 'NEW'
-              ORDER BY created_at`)
+      .query(`SELECT ${COLS} FROM scheduled_tasks WHERE status = 'NEW' ORDER BY created_at`)
       .all() as Task[]
   }
 
   getByJobId(jobId: number): Task[] {
     return this.db
-      .query(`SELECT id, job_id AS jobId, telegram_user_id AS telegramUserId, task_text AS taskText,
-                     status, retry_count AS retryCount, max_retries AS maxRetries,
-                     error_message AS errorMessage, result_text AS resultText,
-                     created_at AS createdAt, started_at AS startedAt, completed_at AS completedAt
-              FROM scheduled_tasks WHERE job_id = ? ORDER BY created_at DESC`)
+      .query(`SELECT ${COLS} FROM scheduled_tasks WHERE job_id = ? ORDER BY created_at DESC`)
       .all(jobId) as Task[]
   }
 

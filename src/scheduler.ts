@@ -11,11 +11,11 @@
 import { Logger } from './logger'
 import type { JobStore } from './job-store'
 import type { TaskStore, Task } from './task-store'
+import { IST_OFFSET_MS } from './time'
 
 const log = new Logger('scheduler')
 
 const POLL_INTERVAL_MS = 30_000
-const IST_OFFSET_MS = 5.5 * 3600 * 1000
 /** A task still INPROGRESS after this is assumed dead and gets requeued. */
 const STALE_INPROGRESS_MS = 5 * 60 * 1000
 

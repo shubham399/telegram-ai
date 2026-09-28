@@ -1,18 +1,11 @@
 import { z } from 'zod'
 import { Logger } from '../logger'
 import type { CustomToolDef } from '../tool-def'
+import { istTimeIn, fmtIST } from '../time'
 
 const log = new Logger('tool:compute')
 
 export const toolName = 'compute'
-
-const IST_OFFSET = 5.5 * 3600 * 1000
-const nowIST = () => {
-  const d = new Date(Date.now() + IST_OFFSET)
-  return { h: d.getUTCHours(), m: d.getUTCMinutes() }
-}
-const fmtIST = (h: number, m: number) =>
-  `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
 
 export function createTool(): CustomToolDef {
   return {
@@ -26,7 +19,7 @@ export function createTool(): CustomToolDef {
       log.info(`tool compute: action=${action ?? '(default get_time)'} time=${time ?? '-'} amount=${amount ?? '-'}`)
       const resolvedAction = action || 'get_time'
       if (resolvedAction === 'get_time') {
-        const { h, m } = nowIST()
+        const { h, m } = istTimeIn()
         const result = `Current IST time: ${fmtIST(h, m)}`
         log.info(`tool compute result: ${result}`)
         return result

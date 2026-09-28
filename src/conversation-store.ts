@@ -30,12 +30,9 @@ export const defaultScope = (agentName = DEFAULT_SESSION): ConversationScope => 
 
 export class ConversationStore {
   private log: Logger
-  /** Best-effort: a build without FTS5 just has no search index. */
-  private fts: boolean
 
   constructor(private db: Database) {
     this.log = new Logger('conversation-store')
-    this.fts = !!db.query(`SELECT 1 FROM sqlite_master WHERE name = 'conversation_fts'`).get()
   }
 
   append(userId: string, scope: ConversationScope, messages: ChatCompletionMessageParam[]): void {

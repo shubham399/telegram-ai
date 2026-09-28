@@ -179,7 +179,7 @@ export class AgentRegistry {
   select(text: string): AgentDef | null {
     const haystack = text.toLowerCase()
 
-    let best: { agent: AgentDef; weight: number; hits: number; at: number; length: number } | null = null
+    let best: Match | null = null
 
     for (const agent of this.agents.values()) {
       let weight = 0
@@ -199,7 +199,7 @@ export class AgentRegistry {
       }
 
       if (hits === 0) continue
-      const candidate = { agent, weight, hits, at, length }
+      const candidate: Match = { agent, weight, hits, at, length }
       if (!best || outranks(candidate, best)) best = candidate
     }
 

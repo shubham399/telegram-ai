@@ -6,9 +6,7 @@
  * The scheduler decides *when*; this module decides *how*.
  */
 import { Logger } from './logger'
-import { maskUserId } from './pii'
 import { processUserMessage } from './ai'
-import type { ConversationScope } from './conversation-store'
 import type { SessionStore } from './session-store'
 import type { MemoryStore } from './memory-store'
 import type { JobStore } from './job-store'
@@ -49,19 +47,14 @@ export function createTaskRunner(deps: TaskRunnerDeps) {
         const existingSessionId =
           sessionStore.get(current.telegramUserId, Infinity)?.composioSessionId ?? null
 
+        // A scheduled run starts from a bare instruction and no history, so it can
+        // never read or overwrite the user's interactive conversation.
         const messages: ChatCompletionMessageParam[] = [
           {
             role: 'user',
             content: `[SCHEDULED TASK — execute this now, do not create a new schedule]\n${current.taskText}`,
           },
         ]
-
-        // Scheduled runs use the default agent and their own session scope, so a
-        // background job never reads or corrupts an interactive conversation.
-        const scope: ConversationScope = {
-          sessionId: `task-${current.id}`,
-          agentName: 'default',
-        }
         const result = await processUserMessage({
           messages,
           entityId: current.telegramUserId,

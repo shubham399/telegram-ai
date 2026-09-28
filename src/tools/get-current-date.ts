@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { CustomToolDef, ToolContext } from '../tool-def'
+import { IST_OFFSET_MS } from '../time'
 
 export const toolName = 'get_current_date'
 
@@ -9,7 +10,6 @@ export const toolName = 'get_current_date'
  * following the server's clock.
  */
 const TZ = 'Asia/Kolkata'
-const TZ_OFFSET_MS = 5.5 * 3600 * 1000
 
 export function createTool(_ctx: ToolContext): CustomToolDef {
   return {
@@ -18,7 +18,7 @@ export function createTool(_ctx: ToolContext): CustomToolDef {
       format: z.enum(['iso', 'readable', 'parts']).optional().describe('Output shape. Defaults to readable.'),
     }),
     execute: async ({ format }) => {
-      const now = new Date(Date.now() + TZ_OFFSET_MS)
+      const now = new Date(Date.now() + IST_OFFSET_MS)
       const iso = now.toISOString()
       if (format === 'iso') return iso
       if (format === 'parts') {

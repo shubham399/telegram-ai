@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
-import type { ChatCompletionTool, ChatCompletionMessageParam, ChatCompletionAssistantMessageParam } from 'openai/resources/chat/completions'
+import type { ChatCompletionTool, ChatCompletionMessageParam } from 'openai/resources/chat/completions'
 import { zodToJsonSchema } from 'zod-to-json-schema'
 import { Composio, OpenAIProvider } from '@composio/core'
 import { Logger } from './logger'
@@ -19,6 +19,7 @@ import type { UsageLedger } from './usage-ledger'
 import type { NoteStore } from './note-store'
 import type { TodoStore } from './todo-store'
 import type { Maintenance } from './maintenance'
+import { IST_OFFSET_MS } from './time'
 
 const log = new Logger('ai')
 
@@ -53,7 +54,9 @@ function stripTextToolCalls(text: string): string {
   return text.split('\n').filter(l => !TEXT_TOOL_RE.test(l.trim())).join('\n').trim()
 }
 
-
+// Not openai's zodFunction(): that builds a *strict* schema, which rejects
+// `.optional()` fields outright, and every tool here has some. Nullable would be a
+// different contract (explicit null vs absent), so the permissive shim stays.
 function customToolToOpenAI(name: string, def: CustomToolDef): ChatCompletionTool {
   return {
     type: 'function',
@@ -225,7 +228,6 @@ export async function processUserMessage(opts: ProcessOptions): Promise<ProcessR
     log.info(`Composio session created: ${maskSessionId(session.sessionId)}`)
   }
 
-  const IST_OFFSET_MS = 5.5 * 3600 * 1000
   const istNow = new Date(Date.now() + IST_OFFSET_MS)
   const istTimeStr = `${String(istNow.getUTCHours()).padStart(2, '0')}:${String(istNow.getUTCMinutes()).padStart(2, '0')}`
   let systemPrompt = `Current IST time: ${istTimeStr}\n${SYSTEM_PROMPT}`
@@ -260,31 +262,26 @@ export async function processUserMessage(opts: ProcessOptions): Promise<ProcessR
   }
   const customTools = await loadTools(ctx, agentName)
 
-  let composioToolNames = new Set<string>()
+  // Composio injects its own management tools (COMPOSIO_MANAGE_CONNECTIONS,
+  // COMPOSIO_MULTI_EXECUTE, …). They are not part of the system prompt's tool
+  // contract, so advertising them makes the model call them and then have no idea
+  // what to do with the result. A failed load is survivable: the run just has no
+  // Composio tools.
+  const nameOf = (t: ChatCompletionTool): string =>
+    (t as { function?: { name?: string } }).function?.name ?? ''
   let composioOpenAITools: ChatCompletionTool[] = []
   try {
-    const raw = await session.tools()
+    const raw = (await session.tools()) as ChatCompletionTool[]
     if (Array.isArray(raw)) {
-      // Composio injects its own management tools (COMPOSIO_MANAGE_CONNECTIONS,
-      // COMPOSIO_MULTI_EXECUTE, …). They are not part of the system prompt's tool
-      // contract, so advertising them makes the model call them and then have no
-      // idea what to do with the result.
-      const all = raw as ChatCompletionTool[]
-      const nameOf = (t: ChatCompletionTool): string =>
-        (t as { function?: { name?: string } }).function?.name ?? ''
-      // Composio injects its own management tools (COMPOSIO_MANAGE_CONNECTIONS,
-      // COMPOSIO_MULTI_EXECUTE, …). They are not part of the system prompt's tool
-      // contract, so advertising them makes the model call them and then have no
-      // idea what to do with the result.
-      const filtered = all.filter(t => !/^COMPOSIO_/i.test(nameOf(t)))
+      const filtered = raw.filter(t => !/^COMPOSIO_/i.test(nameOf(t)))
       composioOpenAITools = agents.allowsComposio(agentName) ? filtered : []
-      const dropped = all.length - composioOpenAITools.length
+      const dropped = raw.length - composioOpenAITools.length
       if (dropped > 0) log.debug(`Filtered ${dropped} COMPOSIO_* meta-tool(s)`)
-      composioToolNames = new Set(composioOpenAITools.map(nameOf).map(n => n.toUpperCase()))
     }
   } catch (err: any) {
     log.warn(`Failed to load composio tools: ${err.message}`)
   }
+  const composioToolNames = new Set(composioOpenAITools.map(nameOf).map(n => n.toUpperCase()))
 
   const toolNames = Object.keys(customTools)
   log.info(`Loaded ${toolNames.length} custom tool(s) + ${composioOpenAITools.length} composio tool(s)`)
@@ -334,6 +331,20 @@ export async function processUserMessage(opts: ProcessOptions): Promise<ProcessR
   let timedOut = false
   let lastToolResult = ''
 
+  // Four exits (cancelled, timed out, max-steps, done) all return the same shape.
+  const done = (
+    text: string,
+    finishReason: ProcessResult['finishReason'],
+    messages = apiMessages.filter(m => m.role !== 'system'),
+  ): ProcessResult => ({
+    text,
+    messages,
+    composioSessionId: session.sessionId,
+    totalSteps: step,
+    finishReason,
+    lastToolResult,
+  })
+
   const execDeps: ToolExecDeps = {
     customTools,
     composio,
@@ -351,14 +362,7 @@ export async function processUserMessage(opts: ProcessOptions): Promise<ProcessR
         log.warn('Run cancelled by user between steps')
         finalText = 'Cancelled.'
         clearTimeout(timeoutId)
-        return {
-          text: finalText,
-          messages: apiMessages.filter(m => m.role !== 'system'),
-          composioSessionId: session.sessionId,
-          totalSteps: step,
-          finishReason: 'cancelled',
-          lastToolResult,
-        }
+        return done(finalText, 'cancelled')
       }
 
       log.info(`Step ${step}/${maxSteps} started`)
@@ -448,14 +452,7 @@ export async function processUserMessage(opts: ProcessOptions): Promise<ProcessR
 
         apiMessages.push(msg)
 
-        return {
-          text: finalText,
-          messages: apiMessages.filter(m => m.role !== 'system'),
-          composioSessionId: session.sessionId,
-          totalSteps: step,
-          finishReason: response.choices[0]?.finish_reason || 'stop',
-          lastToolResult,
-        }
+        return done(finalText, response.choices[0]?.finish_reason || 'stop')
       }
     }
   } catch (err: unknown) {
@@ -471,26 +468,13 @@ export async function processUserMessage(opts: ProcessOptions): Promise<ProcessR
   }
 
   if (timedOut) {
-    return {
-      text: '⚠️ I took too long to respond. Try again.',
-      messages: [],
-      composioSessionId: session.sessionId,
-      totalSteps: step,
-      finishReason: 'timeout',
-      lastToolResult,
-    }
+    // Nothing partial to replay: the abort left apiMessages mid-tool-call.
+    return done('⚠️ I took too long to respond. Try again.', 'timeout', [])
   }
 
   const lastMsg = apiMessages[apiMessages.length - 1]
   const content = lastMsg?.role === 'assistant' ? lastMsg.content : null
-  return {
-    text: typeof content === 'string' ? content : finalText,
-    messages: apiMessages.filter(m => m.role !== 'system'),
-    composioSessionId: session.sessionId,
-    totalSteps: step,
-    finishReason: 'max-steps',
-    lastToolResult,
-  }
+  return done(typeof content === 'string' ? content : finalText, 'max-steps')
 }
 
 /**

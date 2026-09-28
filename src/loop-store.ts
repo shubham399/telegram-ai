@@ -87,7 +87,6 @@ export class LoopStore {
       loopId,
     ])
   }
-
   /** Loops that were mid-flight when the process stopped. */
   findResumable(): LoopRow[] {
     const rows = this.db
@@ -102,26 +101,6 @@ export class LoopStore {
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     }))
-  }
-
-  findForScope(entityId: string, scope: ConversationScope): LoopRow | null {
-    const row = this.db
-      .query(
-        `SELECT * FROM active_loops
-         WHERE entity_id = ? AND session_id = ? AND agent_name = ? AND status = 'running'
-         ORDER BY created_at DESC LIMIT 1`,
-      )
-      .get(entityId, scope.sessionId, scope.agentName) as Record<string, string | number> | undefined
-    if (!row) return null
-    return {
-      id: String(row.id),
-      entityId: String(row.entity_id),
-      scope: { sessionId: String(row.session_id), agentName: String(row.agent_name) },
-      step: Number(row.step),
-      status: 'running' as LoopStatus,
-      createdAt: String(row.created_at),
-      updatedAt: String(row.updated_at),
-    }
   }
 
   /** Drop loops that finished long ago. Checkpoint rows go with them. */

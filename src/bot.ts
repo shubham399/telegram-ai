@@ -10,6 +10,7 @@ import { summarizeConversation, messagesTokens } from './history'
 import { maskPii, maskUserId } from './pii'
 import { userQueue } from './queue'
 import { agents } from './agents'
+import { istTimeIn } from './time'
 import { UserState, KEY_SESSION, KEY_AGENT, KEY_MODEL, DEFAULT_SESSION } from './user-state'
 import type { ConversationScope } from './conversation-store'
 import { createRequest, cancelFor, isCancelled, markFinished } from './request-registry'
@@ -109,6 +110,13 @@ export function createBot(deps: BotDeps) {
     return next()
   })
 
+  /** The IST clock plus `offsetMinutes`, wrapping at midnight. */
+  function istTimeInOffset(offsetMinutes: number): { hour: number; minute: number } {
+    const { h, m } = istTimeIn()
+    const totalMin = h * 60 + m + offsetMinutes
+    return { hour: Math.floor(totalMin / 60) % 24, minute: totalMin % 60 }
+  }
+
   function parseScheduling(text: string, uid: string): { handled: boolean; reply?: string } {
     if (!jobStore) return { handled: false }
 
@@ -145,11 +153,7 @@ export function createBot(deps: BotDeps) {
       const unit = remindMatch[2].toLowerCase()
       const task = remindMatch[3]?.trim() || 'reminder'
       const offsetMinutes = unit.startsWith('hour') ? amount * 60 : amount
-      const IST_OFFSET = 5.5 * 3600 * 1000
-      const now = new Date(Date.now() + IST_OFFSET)
-      const totalMin = now.getUTCHours() * 60 + now.getUTCMinutes() + offsetMinutes
-      const hour = Math.floor(totalMin / 60) % 24
-      const minute = totalMin % 60
+      const { hour, minute } = istTimeInOffset(offsetMinutes)
       const result = jobStore.create(uid, task, 'once', hour, minute, undefined, false).message
       log.info(`Direct scheduling: "${maskPii(text.slice(0, 120))}" -> once at ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} IST`)
       return { handled: true, reply: `✅ ${result}` }
@@ -174,12 +178,8 @@ export function createBot(deps: BotDeps) {
       const amount = parseInt(genericInMatch[2])
       const unit = genericInMatch[3].toLowerCase()
       const offsetMinutes = unit.startsWith('hour') ? amount * 60 : amount
-      const IST_OFFSET = 5.5 * 3600 * 1000
-      const now = new Date(Date.now() + IST_OFFSET)
-      const totalMin = now.getUTCHours() * 60 + now.getUTCMinutes() + offsetMinutes
-      const hour = Math.floor(totalMin / 60) % 24
-      const minute = totalMin % 60
-      const result = jobStore.create(uid, task, 'once', hour, minute, undefined, true).message
+      const { hour, minute } = istTimeInOffset(offsetMinutes)
+      jobStore.create(uid, task, 'once', hour, minute, undefined, true)
       log.info(`Direct scheduling (generic): "${maskPii(text.slice(0, 120))}" -> once at ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} IST, needsAi=true`)
       return { handled: true, reply: `✅ Scheduled "${task}" for ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} IST. I'll work on it then.` }
     }
@@ -263,7 +263,7 @@ export function createBot(deps: BotDeps) {
 
       try {
         msgLog.info('Calling processUserMessage')
-        const created = createRequest(userId, (ctx.message as any)?.message_id)
+        const created = createRequest(userId)
         request.id = created.id
         const { text: finalText, messages: updatedMessages, composioSessionId, totalSteps, finishReason, lastToolResult } = await processUserMessage({
           messages: aiMessages,
@@ -570,10 +570,6 @@ function toolUxMessage(toolName: string, args?: Record<string, unknown>): string
   if (toolName === 'memory') return null
   if (toolName === 'compute') return null
   return `🔧 ${toolName}…`
-}
-
-function escapeMd(text: string): string {
-  return text.replace(/[_*\[\]()~`>#+\-=|{}.!]/g, '\\$&')
 }
 
 const INJECTION_PATTERNS: { pattern: RegExp; label: string }[] = [

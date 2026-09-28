@@ -1,10 +1,7 @@
 import { z } from 'zod'
-import { Logger } from '../logger'
 import { maskUserId } from '../pii'
 import { router } from '../model-router'
 import type { CustomToolDef, ToolContext } from '../tool-def'
-
-const log = new Logger('tool:ops')
 
 export const toolName = 'ops'
 export const adminOnly = true

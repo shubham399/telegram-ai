@@ -7,7 +7,7 @@
  */
 import { check, section, summary } from './helpers'
 import { KeyedQueue, userQueue } from '../src/queue'
-import { isAdmin, isAdminConfigured } from '../src/admin'
+import { isAdmin } from '../src/admin'
 import { ALLOWED_USER_IDS } from '../src/config'
 
 section('same-user turns run in order, never concurrently')
@@ -77,11 +77,9 @@ check('same key serialised, different key overlapped', 2, sharedMax)
 
 section('admin is deny by default')
 check('the whitelist is populated', true, ALLOWED_USER_IDS.length > 0)
-const configured = isAdminConfigured()
-check('configuration state is reported', 'boolean', typeof configured)
-if (!configured) {
-  check('nobody is admin when unconfigured', false, isAdmin('anyone-at-all'))
-  check('not even the whitelisted owner', false, isAdmin(ALLOWED_USER_IDS[0]))
-}
+// An unconfigured ADMIN_USER_IDS is the case worth asserting: the tool loader
+// hides adminOnly tools off isAdmin(), so an empty set must grant nobody.
+check('nobody is admin when unconfigured', false, isAdmin('anyone-at-all'))
+check('not even a plausible owner id', false, isAdmin(ALLOWED_USER_IDS[0]))
 
 summary()

@@ -2,19 +2,12 @@ import { z } from 'zod'
 import { Logger } from '../logger'
 import { maskUserId, maskPii } from '../pii'
 import type { CustomToolDef, ToolContext } from '../tool-def'
+import { istTimeIn, fmtIST } from '../time'
 
 const log = new Logger('tool:job')
 
 export const toolName = 'createScheduledJob'
 export const needsJobStore = true
-
-const IST_OFFSET = 5.5 * 3600 * 1000
-const nowIST = () => {
-  const d = new Date(Date.now() + IST_OFFSET)
-  return { h: d.getUTCHours(), m: d.getUTCMinutes() }
-}
-const fmtIST = (h: number, m: number) =>
-  `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
 
 export function createTool(ctx: ToolContext): CustomToolDef {
   const { entityId, jobStore } = ctx
@@ -37,7 +30,7 @@ export function createTool(ctx: ToolContext): CustomToolDef {
         log.info(`tool createScheduledJob: action=list`)
         const jobs = jobStore!.listByUser(entityId)
         if (jobs.length === 0) return 'No active scheduled jobs.'
-        return jobs.map(j => `#${j.id} — ${j.scheduleType} at ${j.hour.toString().padStart(2, '0')}:${j.minute.toString().padStart(2, '0')} IST — "${j.task}"`).join('\n')
+        return jobs.map(j => `#${j.id} — ${j.scheduleType} at ${fmtIST(j.hour, j.minute)} IST — "${j.task}"`).join('\n')
       }
       if (action === 'cancel') {
         if (jobId) {
@@ -61,11 +54,11 @@ export function createTool(ctx: ToolContext): CustomToolDef {
         ;[hour, minute] = time.split(':').map(Number)
         log.info(`tool createScheduledJob: action=create task="${maskPii(task.slice(0, 120))}" type=${scheduleType} time=${time} hour=${hour} min=${minute} needsAi=${needsAi}`)
       } else {
-        const { h, m } = nowIST()
+        const { h, m } = istTimeIn()
         const totalMin = h * 60 + m + Math.max(1, Math.floor(offset_minutes!))
         hour = Math.floor(totalMin / 60) % 24
         minute = totalMin % 60
-        log.info(`tool createScheduledJob: action=create task="${maskPii(task.slice(0, 120))}" type=${scheduleType} offset=${offset_minutes}min -> ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} IST needsAi=${needsAi}`)
+        log.info(`tool createScheduledJob: action=create task="${maskPii(task.slice(0, 120))}" type=${scheduleType} offset=${offset_minutes}min -> ${fmtIST(hour, minute)} IST needsAi=${needsAi}`)
       }
       const dowMap: Record<string, number> = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 }
       const dayOfWeekNum = dayOfWeek ? dowMap[dayOfWeek.toLowerCase()] : undefined

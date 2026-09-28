@@ -50,7 +50,7 @@ export interface ToolOutcome {
 }
 
 /** Race a promise against a deadline. The loser is abandoned, not cancelled. */
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   if (!Number.isFinite(ms) || ms <= 0) return promise
 
   let timer: ReturnType<typeof setTimeout>
@@ -98,13 +98,11 @@ export async function runTool(
       result = await withTimeout(
         Promise.resolve(customTools[name].execute(args)),
         timeoutMs,
-        name,
       )
     } else if (composioToolNames.has(name.toUpperCase())) {
       result = await withTimeout(
         deps.composio.provider.executeToolCall(entityId, raw as never),
         timeoutMs,
-        name,
       )
     } else {
       failed = true

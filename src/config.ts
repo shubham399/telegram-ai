@@ -6,7 +6,6 @@ const envSchema = z.object({
   COMPOSIO_API_KEY: z.string().min(1),
   AI_API_KEY: z.string().min(1, 'AI_API_KEY is required'),
   AI_BASE_URL: z.string().optional().default('https://api.openai.com/v1'),
-  LOG_LEVEL: z.string().optional().default('INFO'),
   AGENT_MAX_STEPS: z.coerce.number().int().positive().optional().default(10),
   MAX_TOOL_RESULT_CHARS: z.coerce.number().int().positive().optional().default(16000),
   MODEL: z.string().optional().default('gpt-4o-mini'),
@@ -28,7 +27,6 @@ export const ALLOWED_USER_IDS = env.TELEGRAM_ALLOWED_USERS.split(',').map(s => s
 export const ADMIN_USER_IDS = new Set(
   env.ADMIN_USER_IDS.split(',').map(s => s.trim()).filter(Boolean),
 )
-export const LOG_LEVEL = env.LOG_LEVEL
 export const AGENT_MAX_STEPS = env.AGENT_MAX_STEPS
 export const MAX_TOOL_RESULT_CHARS = env.MAX_TOOL_RESULT_CHARS
 export const MODEL = env.MODEL
